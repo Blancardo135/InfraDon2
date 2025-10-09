@@ -1,0 +1,39 @@
+{
+  "characters": [
+    {
+      "name": "Luke Skywalker",
+      "age": 24,
+      "affiliation": "Rebel Alliance",
+      "lightsaber": true
+    },
+    {
+      "name": "Darth Vader",
+      "age": 45,
+      "affiliation": "Galactic Empire",
+      "lightsaber": true
+    },
+    {
+      "name": "Princess Leia",
+      "age": 22,
+      "affiliation": "Rebel Alliance",
+      "lightsaber": false
+    }
+  ],
+  "planets": [
+    {
+      "name": "Tatooine",
+      "population": "200,000",
+      "affiliation": "Outer Rim Territories"
+    },
+    {
+      "name": "Coruscant",
+      "population": "1 trillion",
+      "affiliation": "Galactic Republic"
+    },
+    {
+      "name": "Hoth",
+      "population": "0",
+      "affiliation": "Neutral"
+    }
+  ]
+}
