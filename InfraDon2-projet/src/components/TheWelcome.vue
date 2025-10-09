@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {ref} from 'vue';
+import PouchDB from 'pouchdb';
 //DATA 
 const counter = ref(0);
 
@@ -7,6 +8,14 @@ const counter = ref(0);
 const increment = ()=> {
   counter.value++;
 }
+
+mounted(){
+    this.initDatabase()
+    this.fetchData()
+}
+
+const db = new PouchDB('http://admin:admin@localhost:5984/infra_53_0850')
+
 </script>
 
 <template>
@@ -14,3 +23,5 @@ const increment = ()=> {
   <p>Counter: {{ counter }}</p>
   <button @click="increment">Increment</button>
 </template>
+
+
