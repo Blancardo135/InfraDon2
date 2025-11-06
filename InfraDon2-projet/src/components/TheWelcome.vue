@@ -35,9 +35,33 @@ const editingCharacter = ref<Character | null>(null)
 // --- Initialisation de la base de données ---
 const initDatabase = () => {
   console.log('=> Connexion à la base de données')
-  const db = new PouchDB('http://RomainBlanchard:admin@localhost:5984/infradon-blaro')
-  storage.value = db
-  console.log('Connecté à la collection :', db?.name)
+  const localDB = new PouchDB('infradon-blaro')
+  storage.value = localDB
+  console.log('Base locale :', localDB?.name);
+
+  localDB.replicate.from('http://RomainBlanchard:admin@localhost:5984/infradon-blaro', { 
+    live: true, 
+    retry: true 
+  }).on('change', (info) => {
+    console.log('Changements reçus du serveur')
+    fetchData()
+  }).on('complete', () => {
+    console.log('Réplication initiale terminée')
+    fetchData()
+  }).on('error', (err) => {
+    console.error('Erreur réplication pull :', err)
+  })
+  
+   localDB.replicate.to('http://RomainBlanchard:admin@localhost:5984/infradon-blaro', { 
+    live: true, 
+    retry: true 
+  }).on('change', (info) => {
+    console.log('Changements envoyés au serveur')
+  }).on('complete', () => {
+    console.log('Réplication inverse terminée')
+  }).on('error', (err) => {
+    console.error('Erreur réplication push :', err)
+  })
 }
 
 // --- Récupération des données existantes ---
