@@ -64,6 +64,19 @@ const initDatabase = () => {
   })
 }
 
+// --- Créer un index sur l'affiliation ---
+const createIndex = async () => {
+  if (!storage.value) return
+  try {
+    await storage.value.createIndex({
+      index: { fields: ['characters.affiliation'] }
+    })
+    console.log('Index créé sur "characters.affiliation"')
+  } catch (err) {
+    console.error('Erreur création index :', err)
+  }
+}
+
 // --- Récupération des données existantes ---
 const fetchData = async () => {
   if (!storage.value) return
@@ -106,7 +119,7 @@ const addCharacter = async () => {
 
     // Enregistrer dans la base CouchDB
     const response = await storage.value.put(newDoc)
-    console.log('✅ Personnage ajouté avec succès')
+    console.log('Personnage ajouté avec succès')
 
     // Ajouter directement dans la liste locale
     characters.value.push({
@@ -123,7 +136,7 @@ const addCharacter = async () => {
       lightsaber: false
     }
   } catch (err) {
-    console.error('❌ Erreur lors de l\'ajout :', err)
+    console.error('Erreur lors de l\'ajout :', err)
   }
 }
 
@@ -154,7 +167,7 @@ const saveEdit = async (index: number) => {
     
     // Sauvegarder dans CouchDB
     const response = await storage.value.put(doc)
-    console.log('✅ Personnage modifié avec succès')
+    console.log('Personnage modifié avec succès')
     
     // Mettre à jour localement
     characters.value[index] = {
@@ -166,7 +179,7 @@ const saveEdit = async (index: number) => {
     // Sortir du mode édition
     cancelEdit()
   } catch (err) {
-    console.error('❌ Erreur lors de la modification :', err)
+    console.error('Erreur lors de la modification :', err)
   }
 }
 
@@ -185,16 +198,33 @@ const deleteCharacter = async (index: number) => {
     
     // Supprimer le document de CouchDB
     await storage.value.remove(doc)
-    console.log('✅ Personnage supprimé avec succès')
+    console.log('Personnage supprimé avec succès')
     
     // Supprimer localement
     characters.value.splice(index, 1)
   } catch (err) {
-    console.error('❌ Erreur lors de la suppression :', err)
+    console.error('Erreur lors de la suppression :', err)
   }
 }
 
-// --- Cycle de vie Vue ---
+//
+const searchAffiliation = ref('')
+
+const searchByAffiliation = () => {
+  if (!searchAffiliation.value) {
+    fetchData() // si rien, on recharge tout
+    return
+  }
+
+  // Filtrage local
+  const filtered = characters.value.filter(
+    (char) => char.data.affiliation.toLowerCase() === searchAffiliation.value.toLowerCase()
+  )
+  characters.value = filtered
+}
+
+
+// 
 onMounted(() => {
   initDatabase()
   fetchData()
@@ -242,6 +272,23 @@ onMounted(() => {
       Ajouter
     </button>
   </form>
+  <!-- 🔹 Recherche locale par affiliation -->
+<div class="p-4 mb-6 border rounded bg-gray-50 space-y-2">
+  <h2 class="font-semibold text-lg mb-2">Recherche par affiliation</h2>
+  <div class="flex items-center space-x-2">
+    <input
+      v-model="searchAffiliation"
+      placeholder="Ex: Jedi"
+      class="border p-2 rounded w-full"
+    />
+    <button
+      @click="searchByAffiliation"
+      class="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 transition"
+    >
+      Rechercher
+    </button>
+  </div>
+</div>
 
   <!-- 🔹 Liste des personnages -->
   <section>
@@ -272,6 +319,8 @@ onMounted(() => {
           </button>
         </div>
       </div>
+
+      
 
       <!-- Mode édition -->
       <div v-else class="space-y-2">
