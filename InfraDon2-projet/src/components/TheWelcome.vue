@@ -79,7 +79,7 @@ const startSync = () => {
   })
   .on('change', () => {
     console.log("Données synchronisées")
-    fetchData()  // rafraîchir les données après sync
+    fetchData()
   })
   .on('error', (err: any) => {
     console.error("Erreur sync :", err)
@@ -89,7 +89,7 @@ const startSync = () => {
 const stopSync = () => {
   console.log("Synchronisation STOPPÉE")
   if (syncHandler && syncHandler.cancel) {
-    syncHandler.cancel()  // stoppe la réplication live
+    syncHandler.cancel()  
   }
 }
 
@@ -98,10 +98,10 @@ const toggleOnline = () => {
 
   if (isOnline.value) {
     console.log("Passage en mode ONLINE")
-    startSync()  // relancer la sync
+    startSync()
   } else {
     console.log("Passage en mode OFFLINE")
-    stopSync()   // arrêter la sync
+    stopSync() 
   }
 }
 
