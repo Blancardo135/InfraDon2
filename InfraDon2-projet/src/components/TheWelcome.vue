@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import PouchDB from 'pouchdb'
+import PouchDBFind from 'pouchdb-find'
+PouchDB.plugin(PouchDBFind)
 
 
 interface Character {
@@ -18,7 +20,10 @@ interface CharacterDoc {
 
 
 const storage = ref<any>(null)
-const characters = ref<{ data: Character; docId: string; docRev: string }[]>([])
+const characters = ref<{ data: Character; docId: string; docRev: string }[]>([]);
+const isOnline = ref(true)
+let syncHandler: any = null
+
 
 
 const newCharacter = ref<Character>({
@@ -64,6 +69,42 @@ const initDatabase = () => {
   })
 }
 
+const startSync = () => {
+  if (!storage.value) return
+  console.log("Synchronisation ACTIVÉE")
+
+  syncHandler = storage.value.sync('http://RomainBlanchard:admin@localhost:5984/infradon-blaro', {
+    live: true,
+    retry: true
+  })
+  .on('change', () => {
+    console.log("Données synchronisées")
+    fetchData()  // rafraîchir les données après sync
+  })
+  .on('error', (err: any) => {
+    console.error("Erreur sync :", err)
+  })
+}
+
+const stopSync = () => {
+  console.log("Synchronisation STOPPÉE")
+  if (syncHandler && syncHandler.cancel) {
+    syncHandler.cancel()  // stoppe la réplication live
+  }
+}
+
+const toggleOnline = () => {
+  isOnline.value = !isOnline.value
+
+  if (isOnline.value) {
+    console.log("Passage en mode ONLINE")
+    startSync()  // relancer la sync
+  } else {
+    console.log("Passage en mode OFFLINE")
+    stopSync()   // arrêter la sync
+  }
+}
+
 
 const createIndex = async () => {
   if (!storage.value) return
@@ -71,7 +112,7 @@ const createIndex = async () => {
     await storage.value.createIndex({
       index: { fields: ['characters.affiliation'] }
     })
-    console.log('Index créé sur "characters.affiliation"')
+    console.log('Index créé sur characters.affiliation')
   } catch (err) {
     console.error('Erreur création index :', err)
   }
@@ -215,15 +256,27 @@ const searchByAffiliation = () => {
 }
 
 
-// 
 onMounted(() => {
   initDatabase()
+  createIndex()
   fetchData()
+  startSync()
 })
+
 </script>
 
 <template>
   <h1 class="text-2xl font-bold mb-4">Liste des personnages</h1>
+  <div class="mb-4">
+  <button
+    @click="toggleOnline"
+    class="px-4 py-2 rounded text-white"
+    :class="isOnline ? 'bg-green-600' : 'bg-gray-600'"
+  >
+    {{ isOnline ? 'Mode Online ✔' : 'Mode Offline ✖' }}
+  </button>
+</div>
+
 
   <form @submit.prevent="addCharacter" class="p-4 mb-6 border rounded bg-gray-50 space-y-2">
     <h2 class="font-semibold text-lg mb-2">Ajouter un personnage</h2>
