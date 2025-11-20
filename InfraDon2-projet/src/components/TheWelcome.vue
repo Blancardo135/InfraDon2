@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue'
 import PouchDB from 'pouchdb'
 
-// Définition du type de données
+
 interface Character {
   name: string
   age: number
@@ -16,11 +16,11 @@ interface CharacterDoc {
   characters: Character[]
 }
 
-// Références à la base et aux données
+
 const storage = ref<any>(null)
 const characters = ref<{ data: Character; docId: string; docRev: string }[]>([])
 
-// Données du nouveau personnage à ajouter
+
 const newCharacter = ref<Character>({
   name: '',
   age: 0,
@@ -28,11 +28,11 @@ const newCharacter = ref<Character>({
   lightsaber: false
 })
 
-// État pour l'édition
+
 const editingIndex = ref<number | null>(null)
 const editingCharacter = ref<Character | null>(null)
 
-// --- Initialisation de la base de données ---
+
 const initDatabase = () => {
   console.log('=> Connexion à la base de données')
   const localDB = new PouchDB('infradon-blaro')
@@ -64,7 +64,7 @@ const initDatabase = () => {
   })
 }
 
-// --- Créer un index sur l'affiliation ---
+
 const createIndex = async () => {
   if (!storage.value) return
   try {
@@ -77,7 +77,7 @@ const createIndex = async () => {
   }
 }
 
-// --- Récupération des données existantes ---
+
 const fetchData = async () => {
   if (!storage.value) return
 
@@ -85,7 +85,6 @@ const fetchData = async () => {
     const result = await storage.value.allDocs({ include_docs: true })
     console.log('=> Données récupérées :', result)
 
-    // Extraire tous les personnages avec leur référence de document
     const allCharacters: { data: Character; docId: string; docRev: string }[] = []
     
     result.rows.forEach((row: any) => {
@@ -106,29 +105,25 @@ const fetchData = async () => {
   }
 }
 
-// --- Ajout d'un nouveau personnage/document ---
 const addCharacter = async () => {
   if (!storage.value) return
 
   try {
-    // Créer un nouveau document avec le personnage
+
     const newDoc = {
-      _id: new Date().toISOString(), // id unique basé sur le timestamp
+      _id: new Date().toISOString(),
       characters: [newCharacter.value]
     }
 
-    // Enregistrer dans la base CouchDB
     const response = await storage.value.put(newDoc)
     console.log('Personnage ajouté avec succès')
 
-    // Ajouter directement dans la liste locale
     characters.value.push({
       data: { ...newCharacter.value },
       docId: newDoc._id,
       docRev: response.rev
     })
 
-    // Réinitialiser le formulaire
     newCharacter.value = {
       name: '',
       age: 0,
@@ -140,50 +135,48 @@ const addCharacter = async () => {
   }
 }
 
-// --- Activer le mode édition ---
+
 const startEdit = (index: number) => {
   editingIndex.value = index
   editingCharacter.value = { ...characters.value[index].data }
 }
 
-// --- Annuler l'édition ---
+
 const cancelEdit = () => {
   editingIndex.value = null
   editingCharacter.value = null
 }
 
-// --- Sauvegarder les modifications ---
+
 const saveEdit = async (index: number) => {
   if (!storage.value || !editingCharacter.value) return
 
   try {
     const charToUpdate = characters.value[index]
     
-    // Récupérer le document complet
     const doc: CharacterDoc = await storage.value.get(charToUpdate.docId)
     
-    // Comme nous stockons un personnage par document, on met à jour le premier élément
     doc.characters[0] = editingCharacter.value
     
-    // Sauvegarder dans CouchDB
+
     const response = await storage.value.put(doc)
     console.log('Personnage modifié avec succès')
     
-    // Mettre à jour localement
+
     characters.value[index] = {
       data: { ...editingCharacter.value },
       docId: charToUpdate.docId,
       docRev: response.rev
     }
     
-    // Sortir du mode édition
+
     cancelEdit()
   } catch (err) {
     console.error('Erreur lors de la modification :', err)
   }
 }
 
-// --- Supprimer un personnage ---
+
 const deleteCharacter = async (index: number) => {
   if (!storage.value) return
   
@@ -192,15 +185,14 @@ const deleteCharacter = async (index: number) => {
 
   try {
     const charToDelete = characters.value[index]
-    
-    // Récupérer le document pour avoir la dernière révision
+
     const doc = await storage.value.get(charToDelete.docId)
     
-    // Supprimer le document de CouchDB
+
     await storage.value.remove(doc)
     console.log('Personnage supprimé avec succès')
     
-    // Supprimer localement
+
     characters.value.splice(index, 1)
   } catch (err) {
     console.error('Erreur lors de la suppression :', err)
@@ -212,11 +204,10 @@ const searchAffiliation = ref('')
 
 const searchByAffiliation = () => {
   if (!searchAffiliation.value) {
-    fetchData() // si rien, on recharge tout
+    fetchData()
     return
   }
 
-  // Filtrage local
   const filtered = characters.value.filter(
     (char) => char.data.affiliation.toLowerCase() === searchAffiliation.value.toLowerCase()
   )
@@ -234,7 +225,6 @@ onMounted(() => {
 <template>
   <h1 class="text-2xl font-bold mb-4">Liste des personnages</h1>
 
-  <!-- 🔹 Formulaire d'ajout -->
   <form @submit.prevent="addCharacter" class="p-4 mb-6 border rounded bg-gray-50 space-y-2">
     <h2 class="font-semibold text-lg mb-2">Ajouter un personnage</h2>
 
@@ -272,7 +262,6 @@ onMounted(() => {
       Ajouter
     </button>
   </form>
-  <!-- 🔹 Recherche locale par affiliation -->
 <div class="p-4 mb-6 border rounded bg-gray-50 space-y-2">
   <h2 class="font-semibold text-lg mb-2">Recherche par affiliation</h2>
   <div class="flex items-center space-x-2">
@@ -290,14 +279,13 @@ onMounted(() => {
   </div>
 </div>
 
-  <!-- 🔹 Liste des personnages -->
   <section>
     <article
       v-for="(char, index) in characters"
       :key="char.docId"
       class="p-4 border-b hover:bg-gray-100 transition"
     >
-      <!-- Mode lecture -->
+
       <div v-if="editingIndex !== index">
         <h2 class="font-semibold text-lg">{{ char.data.name }}</h2>
         <p>Âge : {{ char.data.age }}</p>
@@ -319,10 +307,6 @@ onMounted(() => {
           </button>
         </div>
       </div>
-
-      
-
-      <!-- Mode édition -->
       <div v-else class="space-y-2">
         <input
           v-model="editingCharacter!.name"
