@@ -44,35 +44,15 @@ const initDatabase = () => {
   storage.value = localDB
   console.log('Base locale :', localDB?.name);
 
-  localDB.replicate.from('http://RomainBlanchard:admin@localhost:5984/infradon-blaro', { 
-    live: true, 
-    retry: true 
-  }).on('change', (info) => {
-    console.log('Changements reçus du serveur')
-    fetchData()
-  }).on('complete', () => {
-    console.log('Réplication initiale terminée')
-    fetchData()
-  }).on('error', (err) => {
-    console.error('Erreur réplication pull :', err)
-  })
-  
-   localDB.replicate.to('http://RomainBlanchard:admin@localhost:5984/infradon-blaro', { 
-    live: true, 
-    retry: true 
-  }).on('change', (info) => {
-    console.log('Changements envoyés au serveur')
-  }).on('complete', () => {
-    console.log('Réplication inverse terminée')
-  }).on('error', (err) => {
-    console.error('Erreur réplication push :', err)
-  })
+  fetchData()
+  createIndex()
 }
 
 const startSync = () => {
   if (!storage.value) return
-  console.log("Synchronisation ACTIVÉE")
+  if (syncHandler) return
 
+  console.log("Synchronisation ACTIVÉE")
   syncHandler = storage.value.sync('http://RomainBlanchard:admin@localhost:5984/infradon-blaro', {
     live: true,
     retry: true
@@ -87,23 +67,29 @@ const startSync = () => {
 }
 
 const stopSync = () => {
-  console.log("Synchronisation STOPPÉE")
   if (syncHandler && syncHandler.cancel) {
-    syncHandler.cancel()  
+    console.log("Synchronisation STOPPÉE")
+    syncHandler.cancel()
+    syncHandler = null
   }
 }
 
 const toggleOnline = () => {
   isOnline.value = !isOnline.value
+  console.log("Mode en ligne ?", isOnline.value)
 
   if (isOnline.value) {
-    console.log("Passage en mode ONLINE")
     startSync()
   } else {
-    console.log("Passage en mode OFFLINE")
-    stopSync() 
+    stopSync()
   }
 }
+
+onMounted(() => {
+  initDatabase()
+  if (isOnline.value) startSync()
+})
+
 
 
 const createIndex = async () => {
