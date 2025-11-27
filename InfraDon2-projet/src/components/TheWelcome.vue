@@ -741,7 +741,7 @@ onMounted(() => {
               <p>{{ msg.text }}</p>
               <p class="text-sm text-gray-500"> {{ msg.likes }} likes</p>
               <div class="mt-2 space-x-2">
-                <button @click="likeMessage(index, msgIndex)" class="bg-pink-500 text-white px-2 py-1 rounded text-xs">❤️ Like</button>
+                <button @click="likeMessage(index, msgIndex)" class="bg-pink-500 text-white px-2 py-1 rounded text-xs">Like</button>
                 <button @click="startEditMessage(index, msgIndex)" class="bg-green-500 text-white px-2 py-1 rounded text-xs">Modifier</button>
                 <button @click="deleteMessage(index, msgIndex)" class="bg-red-500 text-white px-2 py-1 rounded text-xs">Supprimer</button>
               </div>
