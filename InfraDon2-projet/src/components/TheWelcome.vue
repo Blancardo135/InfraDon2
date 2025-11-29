@@ -25,7 +25,6 @@ interface Character {
   likes: number
   messages?: Message[]
 }
-
 interface CharacterDoc {
   _id: string
   _rev?: string
