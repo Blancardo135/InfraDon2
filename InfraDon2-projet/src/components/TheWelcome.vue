@@ -25,14 +25,25 @@ interface Character {
   likes: number
   messages?: Message[]
 }
+
 interface CharacterDoc {
   _id: string
   _rev?: string
-  characters: Character[]
+  type?: string 
+  characters?: Character[]
+ 
+  name?: string
+  age?: number
+  affiliation?: string
+  lightsaber?: boolean
+  likes?: number
+  messages?: Message[]
 }
 
+const COUCH_REMOTE = 'http://RomainBlanchard:admin@localhost:5984/coachdb';
+
 const storage = ref<any>(null)
-const characters = ref<{ data: Character; docId: string; docRev: string }[]>([]);
+const characters = ref<{ data: Character; docId: string; docRev: string }[]>([])
 const isOnline = ref(true)
 let syncHandler: any = null
 
@@ -56,49 +67,88 @@ const newCommentText = ref<{ [key: string]: string }>({})
 const editingCommentIndex = ref<{ charIndex: number; msgIndex: number; commentIndex: number } | null>(null)
 const editingCommentText = ref('')
 
-// NOUVEAU : État pour gérer la visibilité des commentaires (clé: "charIndex-msgIndex")
+
 const visibleComments = ref<{ [key: string]: boolean }>({})
 
 const searchMessageText = ref('')
 const sortByLikes = ref(false)
 const searchAffiliation = ref('')
 
+function extractCharactersFromDoc(doc: CharacterDoc) {
+  const out: { data: Character; docId: string; docRev?: string }[] = []
+
+  if (doc.type === 'character') {
+    const c: Character = {
+      name: doc.name || '',
+      age: doc.age || 0,
+      affiliation: doc.affiliation || '',
+      lightsaber: !!doc.lightsaber,
+      likes: doc.likes === undefined ? 0 : doc.likes,
+      messages: Array.isArray(doc.messages) ? doc.messages : []
+    }
+    out.push({ data: c, docId: doc._id, docRev: doc._rev })
+    return out
+  }
+
+  if (Array.isArray((doc as any).characters)) {
+    (doc as any).characters.forEach((char: any) => {
+      const c: Character = {
+        name: char.name || '',
+        age: char.age || 0,
+        affiliation: char.affiliation || '',
+        lightsaber: !!char.lightsaber,
+        likes: char.likes === undefined ? 0 : char.likes,
+        messages: Array.isArray(char.messages) ? char.messages : []
+      }
+      out.push({ data: c, docId: doc._id, docRev: doc._rev })
+    })
+    return out
+  }
+  return out
+}
+
 const initDatabase = () => {
   console.log('=> Connexion à la base de données')
   const localDB = new PouchDB('infradon-blaro')
   storage.value = localDB
-  console.log('Base locale :', localDB?.name);
+  console.log('Base locale :', localDB?.name)
 
-  fetchData()
+ 
   createIndex()
+  fetchData()
+  startSync()
 }
 
 const startSync = () => {
   if (!storage.value) return
   if (syncHandler) return
 
-  console.log("Synchronisation ACTIVÉE")
-  syncHandler = storage.value.sync('http://RomainBlanchard:admin@localhost:5984/infradon-blaro', {
+  console.log('Synchronisation ACTIVÉE ->', COUCH_REMOTE)
+  syncHandler = storage.value.sync(COUCH_REMOTE, {
     live: true,
     retry: true
   })
-  .on('change', () => {
-    console.log("Données synchronisées")
-    // Si on est en mode "Top 10", on recharge le tri, sinon fetch normal
-    if (sortByLikes.value) {
-      toggleSortByLikes() 
-    } else {
-      fetchData()
-    }
-  })
-  .on('error', (err: any) => {
-    console.error("Erreur sync :", err)
-  })
+    .on('change', (info: any) => {
+      console.log('Données synchronisées', info)
+      if (sortByLikes.value) {
+        fetchData(true)
+      } else {
+        fetchData()
+      }
+    })
+    .on('paused', (err: any) => {
+    })
+    .on('active', () => {
+
+    })
+    .on('error', (err: any) => {
+      console.error('Erreur sync :', err)
+    })
 }
 
 const stopSync = () => {
   if (syncHandler && syncHandler.cancel) {
-    console.log("Synchronisation STOPPÉE")
+    console.log('Synchronisation STOPPÉE')
     syncHandler.cancel()
     syncHandler = null
   }
@@ -106,74 +156,84 @@ const stopSync = () => {
 
 const toggleOnline = () => {
   isOnline.value = !isOnline.value
-  console.log("Mode en ligne ?", isOnline.value)
+  console.log('Mode en ligne ?', isOnline.value)
 
-  if (isOnline.value) {
-    startSync()
-  } else {
-    stopSync()
-  }
+  if (isOnline.value) startSync()
+  else stopSync()
 }
 
 const createIndex = async () => {
   if (!storage.value) return
   try {
-    await storage.value.createIndex({ index: { fields: ['characters.affiliation'] } })
-    await storage.value.createIndex({ index: { fields: ['characters.messages.text'] } })
-    await storage.value.createIndex({ index: { fields: ['characters.likes'] } })
+
+    await storage.value.createIndex({ index: { fields: ['type', 'affiliation'] } })
+    await storage.value.createIndex({ index: { fields: ['type', 'likes'] } })
+    await storage.value.createIndex({ index: { fields: ['type', 'messages.text'] } })
     console.log('Index créés')
   } catch (err) {
     console.error('Erreur création index :', err)
   }
 }
-
-const fetchData = async () => {
+const fetchData = async (onlyTop = false) => {
   if (!storage.value) return
-  // Si le tri est actif, on ne fait pas un fetchAll classique pour ne pas écraser le tri
-  if (sortByLikes.value) return 
 
   try {
     const result = await storage.value.allDocs({ include_docs: true })
-    console.log('=> Données récupérées :', result)
 
     const allCharacters: { data: Character; docId: string; docRev: string }[] = []
-    
+
     result.rows.forEach((row: any) => {
-      if (row.doc.characters && Array.isArray(row.doc.characters)) {
-        row.doc.characters.forEach((char: Character) => {
-          if (!char.messages) char.messages = []
-          if (char.likes === undefined) char.likes = 0
-          allCharacters.push({
-            data: char,
-            docId: row.doc._id,
-            docRev: row.doc._rev
-          })
+      if (!row.doc) return
+      const extracted = extractCharactersFromDoc(row.doc as CharacterDoc)
+      extracted.forEach((entry) => {
+        if (!entry.data.messages) entry.data.messages = []
+        if (entry.data.likes === undefined) entry.data.likes = 0
+        allCharacters.push({
+          data: entry.data,
+          docId: entry.docId,
+          docRev: entry.docRev || row.doc._rev
         })
-      }
+      })
     })
-    
-    characters.value = allCharacters
+
+    if (onlyTop) {
+      allCharacters.sort((a, b) => (b.data.likes || 0) - (a.data.likes || 0))
+      characters.value = allCharacters.slice(0, 10)
+    } else {
+      characters.value = allCharacters
+    }
   } catch (err) {
     console.error('Erreur lors de la récupération :', err)
   }
 }
 
+//crud
 const addCharacter = async () => {
   if (!storage.value) return
   try {
-    const newDoc = {
-      _id: new Date().toISOString(),
-      characters: [{ ...newCharacter.value, messages: [], likes: 0 }]
+    const doc: CharacterDoc = {
+      _id: 'character:' + new Date().toISOString(),
+      type: 'character',
+      name: newCharacter.value.name,
+      age: newCharacter.value.age,
+      affiliation: newCharacter.value.affiliation,
+      lightsaber: newCharacter.value.lightsaber,
+      likes: newCharacter.value.likes || 0,
+      messages: Array.isArray(newCharacter.value.messages) ? newCharacter.value.messages : []
     }
-    const response = await storage.value.put(newDoc)
-    console.log('Personnage ajouté avec succès')
-
+    const response = await storage.value.put(doc)
     characters.value.push({
-      data: { ...newCharacter.value, messages: [], likes: 0 },
-      docId: newDoc._id,
+      data: {
+        name: doc.name!,
+        age: doc.age!,
+        affiliation: doc.affiliation!,
+        lightsaber: !!doc.lightsaber,
+        likes: doc.likes || 0,
+        messages: doc.messages || []
+      },
+      docId: doc._id,
       docRev: response.rev
     })
-
     newCharacter.value = {
       name: '',
       age: 0,
@@ -183,7 +243,7 @@ const addCharacter = async () => {
       messages: []
     }
   } catch (err) {
-    console.error('Erreur lors de l\'ajout :', err)
+    console.error("Erreur lors de l'ajout :", err)
   }
 }
 
@@ -202,11 +262,34 @@ const saveEdit = async (index: number) => {
   try {
     const charToUpdate = characters.value[index]
     const doc: CharacterDoc = await storage.value.get(charToUpdate.docId)
-    doc.characters[0] = editingCharacter.value
+
+    if (doc.type === 'character') {
+      doc.name = editingCharacter.value.name
+      doc.age = editingCharacter.value.age
+      doc.affiliation = editingCharacter.value.affiliation
+      doc.lightsaber = editingCharacter.value.lightsaber
+      // on ne touche pas likes/messages ici si non fourni
+      if (!doc.messages) doc.messages = editingCharacter.value.messages || []
+      if (editingCharacter.value.likes !== undefined) doc.likes = editingCharacter.value.likes
+    } else if (Array.isArray(doc.characters)) {
+      const idx = doc.characters.findIndex((c: any) =>
+        c.name === charToUpdate.data.name &&
+        c.age === charToUpdate.data.age &&
+        c.affiliation === charToUpdate.data.affiliation
+      )
+      const replaceIndex = idx >= 0 ? idx : 0
+      doc.characters[replaceIndex] = { ...editingCharacter.value }
+    } else {
+      doc.type = 'character'
+      doc.name = editingCharacter.value.name
+      doc.age = editingCharacter.value.age
+      doc.affiliation = editingCharacter.value.affiliation
+      doc.lightsaber = editingCharacter.value.lightsaber
+      doc.likes = editingCharacter.value.likes || 0
+      doc.messages = editingCharacter.value.messages || []
+    }
 
     const response = await storage.value.put(doc)
-    console.log('Personnage modifié avec succès')
-
     characters.value[index] = {
       data: { ...editingCharacter.value },
       docId: charToUpdate.docId,
@@ -234,11 +317,13 @@ const deleteCharacter = async (index: number) => {
   }
 }
 
+
 const addMessage = async (charIndex: number) => {
   if (!storage.value || !newMessageText.value[charIndex]) return
   try {
     const char = characters.value[charIndex]
     const doc: CharacterDoc = await storage.value.get(char.docId)
+
     const newMessage: Message = {
       id: new Date().toISOString(),
       text: newMessageText.value[charIndex],
@@ -246,12 +331,27 @@ const addMessage = async (charIndex: number) => {
       createdAt: new Date().toISOString()
     }
 
-    if (!doc.characters[0].messages) doc.characters[0].messages = []
-    doc.characters[0].messages.push(newMessage)
+    if (doc.type === 'character') {
+      if (!Array.isArray(doc.messages)) doc.messages = []
+      doc.messages.push(newMessage)
+    } else if (Array.isArray(doc.characters) && doc.characters.length > 0) {
+      if (!Array.isArray(doc.characters[0].messages)) doc.characters[0].messages = []
+      doc.characters[0].messages.push(newMessage)
+    } else {
+      doc.type = 'character'
+      doc.messages = [newMessage]
+      doc.name = doc.name || 'unknown'
+      doc.age = doc.age || 0
+      doc.affiliation = doc.affiliation || ''
+      doc.lightsaber = !!doc.lightsaber
+      doc.likes = doc.likes || 0
+    }
 
     const response = await storage.value.put(doc)
-    characters.value[charIndex].data.messages = doc.characters[0].messages
-    characters.value[charIndex].docRev = response.rev
+    const extracted = extractCharactersFromDoc(doc)
+    characters.value = characters.value.map(c =>
+      c.docId === doc._id ? { data: extracted[0].data, docId: doc._id, docRev: response.rev } : c
+    )
     newMessageText.value[charIndex] = ''
   } catch (err) {
     console.error('Erreur ajout message :', err)
@@ -274,10 +374,20 @@ const saveEditMessage = async () => {
     const { charIndex, msgIndex } = editingMessageIndex.value
     const char = characters.value[charIndex]
     const doc: CharacterDoc = await storage.value.get(char.docId)
-    doc.characters[0].messages![msgIndex].text = editingMessageText.value
+
+    if (doc.type === 'character') {
+      if (!doc.messages) doc.messages = []
+      doc.messages[msgIndex].text = editingMessageText.value
+    } else if (Array.isArray(doc.characters) && doc.characters[0]) {
+      if (!doc.characters[0].messages) doc.characters[0].messages = []
+      doc.characters[0].messages[msgIndex].text = editingMessageText.value
+    }
+
     const response = await storage.value.put(doc)
-    characters.value[charIndex].data.messages = doc.characters[0].messages
-    characters.value[charIndex].docRev = response.rev
+    const extracted = extractCharactersFromDoc(doc)
+    characters.value = characters.value.map(c =>
+      c.docId === doc._id ? { data: extracted[0].data, docId: doc._id, docRev: response.rev } : c
+    )
     cancelEditMessage()
   } catch (err) {
     console.error('Erreur modification message :', err)
@@ -290,10 +400,18 @@ const deleteMessage = async (charIndex: number, msgIndex: number) => {
   try {
     const char = characters.value[charIndex]
     const doc: CharacterDoc = await storage.value.get(char.docId)
-    doc.characters[0].messages!.splice(msgIndex, 1)
+
+    if (doc.type === 'character') {
+      doc.messages!.splice(msgIndex, 1)
+    } else if (Array.isArray(doc.characters) && doc.characters[0]) {
+      doc.characters[0].messages!.splice(msgIndex, 1)
+    }
+
     const response = await storage.value.put(doc)
-    characters.value[charIndex].data.messages = doc.characters[0].messages
-    characters.value[charIndex].docRev = response.rev
+    const extracted = extractCharactersFromDoc(doc)
+    characters.value = characters.value.map(c =>
+      c.docId === doc._id ? { data: extracted[0].data, docId: doc._id, docRev: response.rev } : c
+    )
   } catch (err) {
     console.error('Erreur suppression message :', err)
   }
@@ -304,21 +422,32 @@ const likeCharacter = async (charIndex: number) => {
   try {
     const char = characters.value[charIndex]
     const doc: CharacterDoc = await storage.value.get(char.docId)
-    if (doc.characters[0].likes === undefined) doc.characters[0].likes = 0
-    doc.characters[0].likes++
+
+    if (doc.type === 'character') {
+      if (doc.likes === undefined) doc.likes = 0
+      doc.likes++
+    } else if (Array.isArray(doc.characters) && doc.characters[0]) {
+      if (doc.characters[0].likes === undefined) doc.characters[0].likes = 0
+      doc.characters[0].likes++
+    }
+
     const response = await storage.value.put(doc)
-    characters.value[charIndex].data.likes = doc.characters[0].likes
-    characters.value[charIndex].docRev = response.rev
-    
-    // Si on est en mode trié, on rafraichit la liste pour voir le changement d'ordre potentiel
-    if(sortByLikes.value) {
-       setTimeout(() => toggleSortByLikes(), 100) // Petit délai pour laisser PouchDB indexer
+    const extracted = extractCharactersFromDoc(doc)
+    characters.value = characters.value.map(c =>
+      c.docId === doc._id ? { data: extracted[0].data, docId: doc._id, docRev: response.rev } : c
+    )
+
+    if (sortByLikes.value) {
+      setTimeout(() => fetchData(true), 120)
     }
   } catch (err) {
     console.error('Erreur like personnage :', err)
   }
 }
 
+/**
+ * Commentaires
+ */
 const addComment = async (charIndex: number, msgIndex: number) => {
   const key = `${charIndex}-${msgIndex}`
   if (!storage.value || !newCommentText.value[key]) return
@@ -330,13 +459,26 @@ const addComment = async (charIndex: number, msgIndex: number) => {
       text: newCommentText.value[key],
       createdAt: new Date().toISOString()
     }
-    doc.characters[0].messages![msgIndex].comments.push(newComment)
+
+    if (doc.type === 'character') {
+      if (!doc.messages) doc.messages = []
+      if (!doc.messages[msgIndex]) doc.messages[msgIndex] = { id: new Date().toISOString(), text: '', comments: [], createdAt: new Date().toISOString() }
+      if (!doc.messages[msgIndex].comments) doc.messages[msgIndex].comments = []
+      doc.messages[msgIndex].comments.push(newComment)
+    } else if (Array.isArray(doc.characters) && doc.characters[0]) {
+      if (!doc.characters[0].messages) doc.characters[0].messages = []
+      if (!doc.characters[0].messages[msgIndex]) doc.characters[0].messages[msgIndex] = { id: new Date().toISOString(), text: '', comments: [], createdAt: new Date().toISOString() }
+      if (!doc.characters[0].messages[msgIndex].comments) doc.characters[0].messages[msgIndex].comments = []
+      doc.characters[0].messages[msgIndex].comments.push(newComment)
+    }
+
     const response = await storage.value.put(doc)
-    characters.value[charIndex].data.messages = doc.characters[0].messages
-    characters.value[charIndex].docRev = response.rev
+    const extracted = extractCharactersFromDoc(doc)
+    characters.value = characters.value.map(c =>
+      c.docId === doc._id ? { data: extracted[0].data, docId: doc._id, docRev: response.rev } : c
+    )
+
     newCommentText.value[key] = ''
-    
-    // Optionnel : Ouvrir automatiquement les commentaires quand on en ajoute un
     visibleComments.value[key] = true
   } catch (err) {
     console.error('Erreur ajout commentaire :', err)
@@ -359,10 +501,18 @@ const saveEditComment = async () => {
     const { charIndex, msgIndex, commentIndex } = editingCommentIndex.value
     const char = characters.value[charIndex]
     const doc: CharacterDoc = await storage.value.get(char.docId)
-    doc.characters[0].messages![msgIndex].comments[commentIndex].text = editingCommentText.value
+
+    if (doc.type === 'character') {
+      doc.messages![msgIndex].comments[commentIndex].text = editingCommentText.value
+    } else if (Array.isArray(doc.characters) && doc.characters[0]) {
+      doc.characters[0].messages![msgIndex].comments[commentIndex].text = editingCommentText.value
+    }
+
     const response = await storage.value.put(doc)
-    characters.value[charIndex].data.messages = doc.characters[0].messages
-    characters.value[charIndex].docRev = response.rev
+    const extracted = extractCharactersFromDoc(doc)
+    characters.value = characters.value.map(c =>
+      c.docId === doc._id ? { data: extracted[0].data, docId: doc._id, docRev: response.rev } : c
+    )
     cancelEditComment()
   } catch (err) {
     console.error('Erreur modification commentaire :', err)
@@ -375,133 +525,59 @@ const deleteComment = async (charIndex: number, msgIndex: number, commentIndex: 
   try {
     const char = characters.value[charIndex]
     const doc: CharacterDoc = await storage.value.get(char.docId)
-    doc.characters[0].messages![msgIndex].comments.splice(commentIndex, 1)
+
+    if (doc.type === 'character') {
+      doc.messages![msgIndex].comments.splice(commentIndex, 1)
+    } else if (Array.isArray(doc.characters) && doc.characters[0]) {
+      doc.characters[0].messages![msgIndex].comments.splice(commentIndex, 1)
+    }
+
     const response = await storage.value.put(doc)
-    characters.value[charIndex].data.messages = doc.characters[0].messages
-    characters.value[charIndex].docRev = response.rev
+    const extracted = extractCharactersFromDoc(doc)
+    characters.value = characters.value.map(c =>
+      c.docId === doc._id ? { data: extracted[0].data, docId: doc._id, docRev: response.rev } : c
+    )
   } catch (err) {
     console.error('Erreur suppression commentaire :', err)
   }
 }
 
-// NOUVEAU : Fonction pour basculer l'affichage de tous les commentaires
+
 const toggleCommentVisibility = (charIndex: number, msgIndex: number) => {
   const key = `${charIndex}-${msgIndex}`
   visibleComments.value[key] = !visibleComments.value[key]
 }
-
 const searchMessages = async () => {
   if (!storage.value) return
   if (!searchMessageText.value) {
-    // Reset tri si recherche annulée
-    sortByLikes.value = false 
+    sortByLikes.value = false
     fetchData()
     return
   }
   try {
-    const result = await storage.value.find({
-      selector: {
-        'characters.messages': {
-          $elemMatch: {
-            text: { $regex: searchMessageText.value }
-          }
-        }
-      }
-    })
-
+    const needle = searchMessageText.value.toLowerCase()
+    const result = await storage.value.allDocs({ include_docs: true })
     const allCharacters: { data: Character; docId: string; docRev: string }[] = []
-    result.docs.forEach((doc: any) => {
-      if (doc.characters && Array.isArray(doc.characters)) {
-        doc.characters.forEach((char: Character) => {
-          if (!char.messages) char.messages = []
-          if (char.likes === undefined) char.likes = 0
+    result.rows.forEach((row: any) => {
+      if (!row.doc) return
+      const extracted = extractCharactersFromDoc(row.doc as CharacterDoc)
+      extracted.forEach((entry) => {
+        entry.data.messages = entry.data.messages || []
+        const found = entry.data.messages.some(m => (m.text || '').toLowerCase().includes(needle))
+        if (found) {
           allCharacters.push({
-            data: char,
-            docId: doc._id,
-            docRev: doc._rev
+            data: entry.data,
+            docId: entry.docId,
+            docRev: entry.docRev
           })
-        })
-      }
+        }
+      })
     })
     characters.value = allCharacters
   } catch (err) {
     console.error('Erreur recherche messages :', err)
   }
 }
-
-const toggleSortByLikes = async () => {
-  // Si on était déjà en mode tri, on le désactive et on recharge tout
-  if (sortByLikes.value === true) {
-    sortByLikes.value = false
-    fetchData()
-    return
-  }
-
-  sortByLikes.value = true
-  if (!storage.value) return
-
-  try {
-    const designDoc = {
-      _id: '_design/characters',
-      views: {
-        by_likes: {
-          map: function (doc: any) {
-            if (doc.characters) {
-              doc.characters.forEach(function (char: any) {
-                // @ts-ignore
-                emit(char.likes || 0, { char: char, docId: doc._id, docRev: doc._rev })
-              })
-            }
-          }.toString()
-        }
-      }
-    }
-
-    try {
-      await storage.value.put(designDoc)
-    } catch (e: any) {
-      if (e.status !== 409) throw e 
-    }
-
-    // NOUVEAU : Ajout de `limit: 10` pour répondre à la demande "Afficher les 10 plus likés"
-    const result = await storage.value.query('characters/by_likes', {
-      descending: true,
-      include_docs: true,
-      limit: 10 // <--- Limite le résultat aux 10 premiers
-    })
-
-    const allCharacters: { data: Character; docId: string; docRev: string }[] = []
-    const seenDocs = new Set()
-
-    result.rows.forEach((row: any) => {
-      if (row.doc && !seenDocs.has(row.doc._id)) {
-        seenDocs.add(row.doc._id)
-        if (row.doc.characters && Array.isArray(row.doc.characters)) {
-          row.doc.characters.forEach((char: Character) => {
-            if (!char.messages) char.messages = []
-            if (char.likes === undefined) char.likes = 0
-            allCharacters.push({
-              data: char,
-              docId: row.doc._id,
-              docRev: row.doc._rev
-            })
-          })
-        }
-      }
-    })
-    
-    // Tri final côté client pour s'assurer de l'ordre exact dans l'interface
-    allCharacters.sort((a, b) => (b.data.likes || 0) - (a.data.likes || 0))
-    
-    // NOUVEAU : On ne garde que les 10 premiers de la liste finale
-    characters.value = allCharacters.slice(0, 10)
-
-  } catch (err) {
-    console.error('Erreur tri par likes :', err)
-    fetchData()
-  }
-}
-
 const searchByAffiliation = async () => {
   if (!storage.value) return
   if (!searchAffiliation.value) {
@@ -509,31 +585,22 @@ const searchByAffiliation = async () => {
     fetchData()
     return
   }
+  const needle = searchAffiliation.value.toLowerCase()
   try {
-    const result = await storage.value.find({
-      selector: {
-        'characters': {
-          $elemMatch: {
-            affiliation: { $eq: searchAffiliation.value }
-          }
-        }
-      }
-    })
+    const result = await storage.value.allDocs({ include_docs: true })
     const allCharacters: { data: Character; docId: string; docRev: string }[] = []
-    result.docs.forEach((doc: any) => {
-      if (doc.characters && Array.isArray(doc.characters)) {
-        doc.characters.forEach((char: Character) => {
-          if (char.affiliation.toLowerCase() === searchAffiliation.value.toLowerCase()) {
-            if (!char.messages) char.messages = []
-            if (char.likes === undefined) char.likes = 0
-            allCharacters.push({
-              data: char,
-              docId: doc._id,
-              docRev: doc._rev
-            })
-          }
-        })
-      }
+    result.rows.forEach((row: any) => {
+      if (!row.doc) return
+      const extracted = extractCharactersFromDoc(row.doc as CharacterDoc)
+      extracted.forEach((entry) => {
+        if ((entry.data.affiliation || '').toLowerCase() === needle) {
+          allCharacters.push({
+            data: entry.data,
+            docId: entry.docId,
+            docRev: entry.docRev
+          })
+        }
+      })
     })
     characters.value = allCharacters
   } catch (err) {
@@ -541,11 +608,19 @@ const searchByAffiliation = async () => {
   }
 }
 
+const toggleSortByLikes = async () => {
+  if (sortByLikes.value === true) {
+    sortByLikes.value = false
+    fetchData()
+    return
+  }
+  sortByLikes.value = true
+
+  fetchData(true)
+}
+
 onMounted(() => {
   initDatabase()
-  createIndex()
-  fetchData()
-  startSync()
 })
 </script>
 
@@ -598,14 +673,14 @@ onMounted(() => {
       class="mt-2 px-4 py-2 rounded text-white transition"
       :class="sortByLikes ? 'bg-yellow-600 ring-2 ring-yellow-400' : 'bg-gray-500 hover:bg-gray-600'"
     >
-      {{ sortByLikes ? '🔥 Top 10 Likes Activé (Cliquez pour désactiver)' : 'Afficher le Top 10 Likes' }}
+      {{ sortByLikes ? 'Top 10 Likes Activé (Cliquez pour désactiver)' : 'Afficher le Top 10 Likes' }}
     </button>
   </div>
 
   <section>
     <article
       v-for="(char, index) in characters"
-      :key="char.docId"
+      :key="char.docId + '-' + index"
       class="p-4 border-b hover:bg-gray-100 transition"
     >
       <div v-if="editingIndex !== index">
@@ -666,8 +741,6 @@ onMounted(() => {
                   <button @click="addComment(index, msgIndex)" class="bg-blue-400 text-white px-2 py-1 rounded text-xs">Ajouter</button>
                 </div>
 
-                <!-- NOUVEAU : Affichage conditionnel des commentaires -->
-                <!-- Si visibleComments est true, on affiche tout, sinon on slice(0, 1) pour n'avoir que le 1er -->
                 <div
                   v-for="(comment, commentIndex) in (visibleComments[`${index}-${msgIndex}`] ? msg.comments : msg.comments.slice(0, 1))"
                   :key="comment.id"
@@ -689,7 +762,6 @@ onMounted(() => {
                   </div>
                 </div>
 
-                <!-- NOUVEAU : Bouton pour voir plus/moins de commentaires -->
                 <div v-if="msg.comments.length > 1" class="mt-2">
                   <button 
                     @click="toggleCommentVisibility(index, msgIndex)"
