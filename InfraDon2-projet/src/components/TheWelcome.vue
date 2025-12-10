@@ -4,19 +4,9 @@ import PouchDB from 'pouchdb'
 import PouchDBFind from 'pouchdb-find'
 PouchDB.plugin(PouchDBFind)
 
-interface Comment {
-  id: string
-  text: string
-  createdAt: string
-}
 
-interface Message {
-  id: string
-  text: string
-  comments: Comment[]
-  createdAt: string
-}
-
+interface Comment { id: string; text: string; createdAt: string }
+interface Message { id: string; text: string; createdAt: string; comments: Comment[] }
 interface Character {
   name: string
   age: number
@@ -26,184 +16,169 @@ interface Character {
   messages?: Message[]
 }
 
+//pour pouchdb
 interface CharacterDoc {
   _id: string
   _rev?: string
-  type?: string 
-  characters?: Character[]
- 
-  name?: string
-  age?: number
-  affiliation?: string
-  lightsaber?: boolean
-  likes?: number
-  messages?: Message[]
+  type: 'character'
+  name: string
+  age: number
+  affiliation: string
+  affiliationLower?: string
+  lightsaber: boolean
+  likes: number
 }
 
-const COUCH_REMOTE = 'http://RomainBlanchard:admin@localhost:5984/coachdb';
+interface MessageDoc {
+  _id: string
+  _rev?: string
+  type: 'message'
+  characterId: string
+  text: string
+  textLower: string
+  createdAt: string
+}
+
+interface CommentDoc {
+  _id: string
+  _rev?: string
+  type: 'comment'
+  messageId: string
+  text: string
+  createdAt: string
+}
+
+const COUCH_REMOTE = 'http://RomainBlanchard:admin@localhost:5984/coachdb'
 
 const storage = ref<any>(null)
 const characters = ref<{ data: Character; docId: string; docRev: string }[]>([])
 const isOnline = ref(true)
 let syncHandler: any = null
 
-const newCharacter = ref<Character>({
-  name: '',
-  age: 0,
-  affiliation: '',
-  lightsaber: false,
-  likes: 0,
-  messages: []
-})
+const newCharacter = ref<Character>({ name: '', age: 0, affiliation: '', lightsaber: false, likes: 0, messages: [] })
 
 const editingIndex = ref<number | null>(null)
 const editingCharacter = ref<Character | null>(null)
 
-const newMessageText = ref<{ [key: number]: string }>({})
+const newMessageText = ref<Record<number, string>>({})
 const editingMessageIndex = ref<{ charIndex: number; msgIndex: number } | null>(null)
 const editingMessageText = ref('')
 
-const newCommentText = ref<{ [key: string]: string }>({})
+const newCommentText = ref<Record<string, string>>({})
 const editingCommentIndex = ref<{ charIndex: number; msgIndex: number; commentIndex: number } | null>(null)
 const editingCommentText = ref('')
 
-
-const visibleComments = ref<{ [key: string]: boolean }>({})
+const visibleComments = ref<Record<string, boolean>>({})
 
 const searchMessageText = ref('')
 const sortByLikes = ref(false)
 const searchAffiliation = ref('')
 
-function extractCharactersFromDoc(doc: CharacterDoc) {
-  const out: { data: Character; docId: string; docRev?: string }[] = []
+const iso = () => new Date().toISOString()
 
-  if (doc.type === 'character') {
-    const c: Character = {
-      name: doc.name || '',
-      age: doc.age || 0,
-      affiliation: doc.affiliation || '',
-      lightsaber: !!doc.lightsaber,
-      likes: doc.likes === undefined ? 0 : doc.likes,
-      messages: Array.isArray(doc.messages) ? doc.messages : []
-    }
-    out.push({ data: c, docId: doc._id, docRev: doc._rev })
-    return out
-  }
 
-  if (Array.isArray((doc as any).characters)) {
-    (doc as any).characters.forEach((char: any) => {
-      const c: Character = {
-        name: char.name || '',
-        age: char.age || 0,
-        affiliation: char.affiliation || '',
-        lightsaber: !!char.lightsaber,
-        likes: char.likes === undefined ? 0 : char.likes,
-        messages: Array.isArray(char.messages) ? char.messages : []
-      }
-      out.push({ data: c, docId: doc._id, docRev: doc._rev })
-    })
-    return out
-  }
-  return out
-}
-
-const initDatabase = () => {
-  console.log('=> Connexion à la base de données')
+const initDatabase = async () => {
   const localDB = new PouchDB('infradon-blaro')
   storage.value = localDB
-  console.log('Base locale :', localDB?.name)
-
- 
-  createIndex()
-  fetchData()
+  await createIndexes()
+  await fetchData()
   startSync()
 }
 
-const startSync = () => {
-  if (!storage.value) return
-  if (syncHandler) return
-
-  console.log('Synchronisation ACTIVÉE ->', COUCH_REMOTE)
-  syncHandler = storage.value.sync(COUCH_REMOTE, {
-    live: true,
-    retry: true
-  })
-    .on('change', (info: any) => {
-      console.log('Données synchronisées', info)
-      if (sortByLikes.value) {
-        fetchData(true)
-      } else {
-        fetchData()
-      }
-    })
-    .on('paused', (err: any) => {
-    })
-    .on('active', () => {
-
-    })
-    .on('error', (err: any) => {
-      console.error('Erreur sync :', err)
-    })
-}
-
-const stopSync = () => {
-  if (syncHandler && syncHandler.cancel) {
-    console.log('Synchronisation STOPPÉE')
-    syncHandler.cancel()
-    syncHandler = null
-  }
-}
-
-const toggleOnline = () => {
-  isOnline.value = !isOnline.value
-  console.log('Mode en ligne ?', isOnline.value)
-
-  if (isOnline.value) startSync()
-  else stopSync()
-}
-
-const createIndex = async () => {
+const createIndexes = async () => {
   if (!storage.value) return
   try {
-
-    await storage.value.createIndex({ index: { fields: ['type', 'affiliation'] } })
+    
+    await storage.value.createIndex({ index: { fields: ['type'] } })
     await storage.value.createIndex({ index: { fields: ['type', 'likes'] } })
-    await storage.value.createIndex({ index: { fields: ['type', 'messages.text'] } })
-    console.log('Index créés')
+    await storage.value.createIndex({ index: { fields: ['type', 'affiliationLower'] } })
+    await storage.value.createIndex({ index: { fields: ['type', 'characterId'] } })
+    await storage.value.createIndex({ index: { fields: ['type', 'textLower'] } })
+    await storage.value.createIndex({ index: { fields: ['type', 'messageId'] } })
+    console.log('Index Mango créés')
   } catch (err) {
     console.error('Erreur création index :', err)
   }
 }
-const fetchData = async (onlyTop = false) => {
+
+
+const startSync = () => {
+  if (!storage.value || syncHandler) return
+  syncHandler = storage.value
+    .sync(COUCH_REMOTE, { live: true, retry: true })
+    .on('change', async () => { await fetchData(sortByLikes.value) })
+    .on('error', (err: any) => console.error('Erreur sync :', err))
+}
+const stopSync = () => { if (syncHandler?.cancel) { syncHandler.cancel(); syncHandler = null } }
+const toggleOnline = () => { isOnline.value = !isOnline.value; isOnline.value ? startSync() : stopSync() }
+
+
+const mapCharacterDoc = (d: CharacterDoc) => ({
+  data: { name: d.name, age: d.age, affiliation: d.affiliation, lightsaber: !!d.lightsaber, likes: d.likes ?? 0, messages: [] },
+  docId: d._id,
+  docRev: d._rev || ''
+})
+
+const loadMessagesForCharacter = async (characterId: string, charIndex: number) => {
   if (!storage.value) return
 
-  try {
-    const result = await storage.value.allDocs({ include_docs: true })
-
-    const allCharacters: { data: Character; docId: string; docRev: string }[] = []
-
-    result.rows.forEach((row: any) => {
-      if (!row.doc) return
-      const extracted = extractCharactersFromDoc(row.doc as CharacterDoc)
-      extracted.forEach((entry) => {
-        if (!entry.data.messages) entry.data.messages = []
-        if (entry.data.likes === undefined) entry.data.likes = 0
-        allCharacters.push({
-          data: entry.data,
-          docId: entry.docId,
-          docRev: entry.docRev || row.doc._rev
-        })
-      })
+  const { docs: messageDocs } = await storage.value.find({
+    selector: { type: 'message', characterId }
+  })
+  const messages = (messageDocs as MessageDoc[]).sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  )
+  const messageIds = messages.map(m => m._id)
+  let commentsByMsg = new Map<string, CommentDoc[]>()
+  if (messageIds.length) {
+    const { docs: commentDocs } = await storage.value.find({
+      selector: { type: 'comment', messageId: { $in: messageIds } }
     })
+    commentsByMsg = (commentDocs as CommentDoc[]).reduce((acc, c) => {
+      const arr = acc.get(c.messageId) || []
+      arr.push(c)
+      acc.set(c.messageId, arr)
+      return acc
+    }, new Map<string, CommentDoc[]>())
+  }
+  const uiMessages: Message[] = messages.map(m => ({
+    id: m._id,
+    text: m.text,
+    createdAt: m.createdAt,
+    comments: (commentsByMsg.get(m._id) || [])
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+      .map(c => ({ id: c._id, text: c.text, createdAt: c.createdAt }))
+  }))
+  if (characters.value[charIndex]?.docId === characterId) {
+    characters.value[charIndex].data.messages = uiMessages
+  }
+}
+const reloadAllMessages = async () => {
+  for (let i = 0; i < characters.value.length; i++) {
+    await loadMessagesForCharacter(characters.value[i].docId, i)
+  }
+}
 
+
+const fetchData = async (onlyTop = false) => {
+  if (!storage.value) return
+  try {
     if (onlyTop) {
-      allCharacters.sort((a, b) => (b.data.likes || 0) - (a.data.likes || 0))
-      characters.value = allCharacters.slice(0, 10)
+      const { docs } = await storage.value.find({
+        selector: { type: 'character', likes: { $gte: 0 } },
+        sort: [{ likes: 'desc' }],
+        limit: 10
+      })
+      characters.value = (docs as CharacterDoc[]).map(mapCharacterDoc)
     } else {
-      characters.value = allCharacters
+      const { docs } = await storage.value.find({
+        selector: { type: 'character' }
+      })
+      characters.value = (docs as CharacterDoc[]).map(mapCharacterDoc)
     }
+    await reloadAllMessages()
   } catch (err) {
-    console.error('Erreur lors de la récupération :', err)
+    console.error('Erreur fetch personnages :', err)
   }
 }
 
@@ -212,146 +187,86 @@ const addCharacter = async () => {
   if (!storage.value) return
   try {
     const doc: CharacterDoc = {
-      _id: 'character:' + new Date().toISOString(),
+      _id: 'character:' + iso(),
       type: 'character',
       name: newCharacter.value.name,
       age: newCharacter.value.age,
       affiliation: newCharacter.value.affiliation,
+      affiliationLower: (newCharacter.value.affiliation || '').toLowerCase(),
       lightsaber: newCharacter.value.lightsaber,
-      likes: newCharacter.value.likes || 0,
-      messages: Array.isArray(newCharacter.value.messages) ? newCharacter.value.messages : []
+      likes: newCharacter.value.likes || 0
     }
-    const response = await storage.value.put(doc)
-    characters.value.push({
-      data: {
-        name: doc.name!,
-        age: doc.age!,
-        affiliation: doc.affiliation!,
-        lightsaber: !!doc.lightsaber,
-        likes: doc.likes || 0,
-        messages: doc.messages || []
-      },
-      docId: doc._id,
-      docRev: response.rev
-    })
-    newCharacter.value = {
-      name: '',
-      age: 0,
-      affiliation: '',
-      lightsaber: false,
-      likes: 0,
-      messages: []
-    }
+    const res = await storage.value.put(doc)
+    characters.value.push(mapCharacterDoc({ ...doc, _rev: res.rev }))
+    newCharacter.value = { name: '', age: 0, affiliation: '', lightsaber: false, likes: 0, messages: [] }
   } catch (err) {
-    console.error("Erreur lors de l'ajout :", err)
+    console.error("Erreur ajout personnage :", err)
   }
 }
 
-const startEdit = (index: number) => {
-  editingIndex.value = index
-  editingCharacter.value = { ...characters.value[index].data }
-}
-
-const cancelEdit = () => {
-  editingIndex.value = null
-  editingCharacter.value = null
-}
+const startEdit = (index: number) => { editingIndex.value = index; editingCharacter.value = { ...characters.value[index].data } }
+const cancelEdit = () => { editingIndex.value = null; editingCharacter.value = null }
 
 const saveEdit = async (index: number) => {
   if (!storage.value || !editingCharacter.value) return
   try {
-    const charToUpdate = characters.value[index]
-    const doc: CharacterDoc = await storage.value.get(charToUpdate.docId)
-
-    if (doc.type === 'character') {
-      doc.name = editingCharacter.value.name
-      doc.age = editingCharacter.value.age
-      doc.affiliation = editingCharacter.value.affiliation
-      doc.lightsaber = editingCharacter.value.lightsaber
-      // on ne touche pas likes/messages ici si non fourni
-      if (!doc.messages) doc.messages = editingCharacter.value.messages || []
-      if (editingCharacter.value.likes !== undefined) doc.likes = editingCharacter.value.likes
-    } else if (Array.isArray(doc.characters)) {
-      const idx = doc.characters.findIndex((c: any) =>
-        c.name === charToUpdate.data.name &&
-        c.age === charToUpdate.data.age &&
-        c.affiliation === charToUpdate.data.affiliation
-      )
-      const replaceIndex = idx >= 0 ? idx : 0
-      doc.characters[replaceIndex] = { ...editingCharacter.value }
-    } else {
-      doc.type = 'character'
-      doc.name = editingCharacter.value.name
-      doc.age = editingCharacter.value.age
-      doc.affiliation = editingCharacter.value.affiliation
-      doc.lightsaber = editingCharacter.value.lightsaber
-      doc.likes = editingCharacter.value.likes || 0
-      doc.messages = editingCharacter.value.messages || []
-    }
-
-    const response = await storage.value.put(doc)
-    characters.value[index] = {
-      data: { ...editingCharacter.value },
-      docId: charToUpdate.docId,
-      docRev: response.rev
-    }
+    const curr = characters.value[index]
+    const doc: CharacterDoc = await storage.value.get(curr.docId)
+    doc.name = editingCharacter.value.name
+    doc.age = editingCharacter.value.age
+    doc.affiliation = editingCharacter.value.affiliation
+    doc.affiliationLower = (editingCharacter.value.affiliation || '').toLowerCase()
+    doc.lightsaber = editingCharacter.value.lightsaber
+    if (typeof editingCharacter.value.likes === 'number') doc.likes = editingCharacter.value.likes
+    const res = await storage.value.put(doc)
+    characters.value[index] = mapCharacterDoc({ ...doc, _rev: res.rev })
+    await loadMessagesForCharacter(curr.docId, index)
     cancelEdit()
   } catch (err) {
-    console.error('Erreur lors de la modification :', err)
+    console.error('Erreur modification personnage :', err)
   }
 }
 
 const deleteCharacter = async (index: number) => {
   if (!storage.value) return
-  const confirmDelete = confirm('Êtes-vous sûr de vouloir supprimer ce personnage ?')
-  if (!confirmDelete) return
-
+  if (!confirm('Supprimer ce personnage (et ses messages/commentaires) ?')) return
   try {
-    const charToDelete = characters.value[index]
-    const doc = await storage.value.get(charToDelete.docId)
-    await storage.value.remove(doc)
-    console.log('Personnage supprimé avec succès')
+    const curr = characters.value[index]
+    const characterId = curr.docId
+    const { docs: msgDocs } = await storage.value.find({ selector: { type: 'message', characterId } })
+    const msgs = msgDocs as MessageDoc[]
+    if (msgs.length) {
+      const msgIds = msgs.map(m => m._id)
+      const { docs: cmtDocs } = await storage.value.find({ selector: { type: 'comment', messageId: { $in: msgIds } } })
+      const cmts = cmtDocs as CommentDoc[]
+      if (cmts.length) await storage.value.bulkDocs(cmts.map(c => ({ ...c, _deleted: true })))
+      await storage.value.bulkDocs(msgs.map(m => ({ ...m, _deleted: true })))
+    }
+    const charDoc = await storage.value.get(characterId)
+    await storage.value.remove(charDoc)
     characters.value.splice(index, 1)
   } catch (err) {
-    console.error('Erreur lors de la suppression :', err)
+    console.error('Erreur suppression personnage :', err)
   }
 }
 
 
 const addMessage = async (charIndex: number) => {
-  if (!storage.value || !newMessageText.value[charIndex]) return
+  if (!storage.value) return
+  const text = (newMessageText.value[charIndex] || '').trim()
+  if (!text) return
   try {
     const char = characters.value[charIndex]
-    const doc: CharacterDoc = await storage.value.get(char.docId)
-
-    const newMessage: Message = {
-      id: new Date().toISOString(),
-      text: newMessageText.value[charIndex],
-      comments: [],
-      createdAt: new Date().toISOString()
+    const msg: MessageDoc = {
+      _id: 'message:' + iso(),
+      type: 'message',
+      characterId: char.docId,
+      text,
+      textLower: text.toLowerCase(),
+      createdAt: iso()
     }
-
-    if (doc.type === 'character') {
-      if (!Array.isArray(doc.messages)) doc.messages = []
-      doc.messages.push(newMessage)
-    } else if (Array.isArray(doc.characters) && doc.characters.length > 0) {
-      if (!Array.isArray(doc.characters[0].messages)) doc.characters[0].messages = []
-      doc.characters[0].messages.push(newMessage)
-    } else {
-      doc.type = 'character'
-      doc.messages = [newMessage]
-      doc.name = doc.name || 'unknown'
-      doc.age = doc.age || 0
-      doc.affiliation = doc.affiliation || ''
-      doc.lightsaber = !!doc.lightsaber
-      doc.likes = doc.likes || 0
-    }
-
-    const response = await storage.value.put(doc)
-    const extracted = extractCharactersFromDoc(doc)
-    characters.value = characters.value.map(c =>
-      c.docId === doc._id ? { data: extracted[0].data, docId: doc._id, docRev: response.rev } : c
-    )
+    await storage.value.put(msg)
+    await loadMessagesForCharacter(char.docId, charIndex)
     newMessageText.value[charIndex] = ''
   } catch (err) {
     console.error('Erreur ajout message :', err)
@@ -362,32 +277,18 @@ const startEditMessage = (charIndex: number, msgIndex: number) => {
   editingMessageIndex.value = { charIndex, msgIndex }
   editingMessageText.value = characters.value[charIndex].data.messages![msgIndex].text
 }
-
-const cancelEditMessage = () => {
-  editingMessageIndex.value = null
-  editingMessageText.value = ''
-}
+const cancelEditMessage = () => { editingMessageIndex.value = null; editingMessageText.value = '' }
 
 const saveEditMessage = async () => {
   if (!storage.value || !editingMessageIndex.value) return
   try {
     const { charIndex, msgIndex } = editingMessageIndex.value
-    const char = characters.value[charIndex]
-    const doc: CharacterDoc = await storage.value.get(char.docId)
-
-    if (doc.type === 'character') {
-      if (!doc.messages) doc.messages = []
-      doc.messages[msgIndex].text = editingMessageText.value
-    } else if (Array.isArray(doc.characters) && doc.characters[0]) {
-      if (!doc.characters[0].messages) doc.characters[0].messages = []
-      doc.characters[0].messages[msgIndex].text = editingMessageText.value
-    }
-
-    const response = await storage.value.put(doc)
-    const extracted = extractCharactersFromDoc(doc)
-    characters.value = characters.value.map(c =>
-      c.docId === doc._id ? { data: extracted[0].data, docId: doc._id, docRev: response.rev } : c
-    )
+    const msg = characters.value[charIndex].data.messages![msgIndex]
+    const doc: MessageDoc = await storage.value.get(msg.id)
+    doc.text = editingMessageText.value
+    doc.textLower = editingMessageText.value.toLowerCase()
+    await storage.value.put(doc)
+    await loadMessagesForCharacter(characters.value[charIndex].docId, charIndex)
     cancelEditMessage()
   } catch (err) {
     console.error('Erreur modification message :', err)
@@ -396,88 +297,53 @@ const saveEditMessage = async () => {
 
 const deleteMessage = async (charIndex: number, msgIndex: number) => {
   if (!storage.value) return
-  if (!confirm('Supprimer ce message ?')) return
+  if (!confirm('Supprimer ce message (et ses commentaires) ?')) return
   try {
     const char = characters.value[charIndex]
-    const doc: CharacterDoc = await storage.value.get(char.docId)
-
-    if (doc.type === 'character') {
-      doc.messages!.splice(msgIndex, 1)
-    } else if (Array.isArray(doc.characters) && doc.characters[0]) {
-      doc.characters[0].messages!.splice(msgIndex, 1)
-    }
-
-    const response = await storage.value.put(doc)
-    const extracted = extractCharactersFromDoc(doc)
-    characters.value = characters.value.map(c =>
-      c.docId === doc._id ? { data: extracted[0].data, docId: doc._id, docRev: response.rev } : c
-    )
+    const msg = char.data.messages![msgIndex]
+    const { docs: cmtDocs } = await storage.value.find({ selector: { type: 'comment', messageId: msg.id } })
+    const cmts = cmtDocs as CommentDoc[]
+    if (cmts.length) await storage.value.bulkDocs(cmts.map(c => ({ ...c, _deleted: true })))
+    const msgDoc: MessageDoc = await storage.value.get(msg.id)
+    await storage.value.remove(msgDoc)
+    await loadMessagesForCharacter(char.docId, charIndex)
   } catch (err) {
     console.error('Erreur suppression message :', err)
   }
 }
 
+
 const likeCharacter = async (charIndex: number) => {
   if (!storage.value) return
   try {
-    const char = characters.value[charIndex]
-    const doc: CharacterDoc = await storage.value.get(char.docId)
-
-    if (doc.type === 'character') {
-      if (doc.likes === undefined) doc.likes = 0
-      doc.likes++
-    } else if (Array.isArray(doc.characters) && doc.characters[0]) {
-      if (doc.characters[0].likes === undefined) doc.characters[0].likes = 0
-      doc.characters[0].likes++
-    }
-
-    const response = await storage.value.put(doc)
-    const extracted = extractCharactersFromDoc(doc)
-    characters.value = characters.value.map(c =>
-      c.docId === doc._id ? { data: extracted[0].data, docId: doc._id, docRev: response.rev } : c
-    )
-
-    if (sortByLikes.value) {
-      setTimeout(() => fetchData(true), 120)
-    }
+    const curr = characters.value[charIndex]
+    const doc: CharacterDoc = await storage.value.get(curr.docId)
+    doc.likes = (doc.likes ?? 0) + 1
+    const res = await storage.value.put(doc)
+    characters.value[charIndex] = mapCharacterDoc({ ...doc, _rev: res.rev })
+    if (sortByLikes.value) setTimeout(() => fetchData(true), 120)
+    else await loadMessagesForCharacter(curr.docId, charIndex)
   } catch (err) {
     console.error('Erreur like personnage :', err)
   }
 }
-
-/**
- * Commentaires
- */
 const addComment = async (charIndex: number, msgIndex: number) => {
+  if (!storage.value) return
   const key = `${charIndex}-${msgIndex}`
-  if (!storage.value || !newCommentText.value[key]) return
+  const text = (newCommentText.value[key] || '').trim()
+  if (!text) return
   try {
     const char = characters.value[charIndex]
-    const doc: CharacterDoc = await storage.value.get(char.docId)
-    const newComment: Comment = {
-      id: new Date().toISOString(),
-      text: newCommentText.value[key],
-      createdAt: new Date().toISOString()
+    const msg = char.data.messages![msgIndex]
+    const c: CommentDoc = {
+      _id: 'comment:' + iso(),
+      type: 'comment',
+      messageId: msg.id,
+      text,
+      createdAt: iso()
     }
-
-    if (doc.type === 'character') {
-      if (!doc.messages) doc.messages = []
-      if (!doc.messages[msgIndex]) doc.messages[msgIndex] = { id: new Date().toISOString(), text: '', comments: [], createdAt: new Date().toISOString() }
-      if (!doc.messages[msgIndex].comments) doc.messages[msgIndex].comments = []
-      doc.messages[msgIndex].comments.push(newComment)
-    } else if (Array.isArray(doc.characters) && doc.characters[0]) {
-      if (!doc.characters[0].messages) doc.characters[0].messages = []
-      if (!doc.characters[0].messages[msgIndex]) doc.characters[0].messages[msgIndex] = { id: new Date().toISOString(), text: '', comments: [], createdAt: new Date().toISOString() }
-      if (!doc.characters[0].messages[msgIndex].comments) doc.characters[0].messages[msgIndex].comments = []
-      doc.characters[0].messages[msgIndex].comments.push(newComment)
-    }
-
-    const response = await storage.value.put(doc)
-    const extracted = extractCharactersFromDoc(doc)
-    characters.value = characters.value.map(c =>
-      c.docId === doc._id ? { data: extracted[0].data, docId: doc._id, docRev: response.rev } : c
-    )
-
+    await storage.value.put(c)
+    await loadMessagesForCharacter(char.docId, charIndex)
     newCommentText.value[key] = ''
     visibleComments.value[key] = true
   } catch (err) {
@@ -489,30 +355,18 @@ const startEditComment = (charIndex: number, msgIndex: number, commentIndex: num
   editingCommentIndex.value = { charIndex, msgIndex, commentIndex }
   editingCommentText.value = characters.value[charIndex].data.messages![msgIndex].comments[commentIndex].text
 }
-
-const cancelEditComment = () => {
-  editingCommentIndex.value = null
-  editingCommentText.value = ''
-}
+const cancelEditComment = () => { editingCommentIndex.value = null; editingCommentText.value = '' }
 
 const saveEditComment = async () => {
   if (!storage.value || !editingCommentIndex.value) return
   try {
     const { charIndex, msgIndex, commentIndex } = editingCommentIndex.value
     const char = characters.value[charIndex]
-    const doc: CharacterDoc = await storage.value.get(char.docId)
-
-    if (doc.type === 'character') {
-      doc.messages![msgIndex].comments[commentIndex].text = editingCommentText.value
-    } else if (Array.isArray(doc.characters) && doc.characters[0]) {
-      doc.characters[0].messages![msgIndex].comments[commentIndex].text = editingCommentText.value
-    }
-
-    const response = await storage.value.put(doc)
-    const extracted = extractCharactersFromDoc(doc)
-    characters.value = characters.value.map(c =>
-      c.docId === doc._id ? { data: extracted[0].data, docId: doc._id, docRev: response.rev } : c
-    )
+    const cmt = char.data.messages![msgIndex].comments[commentIndex]
+    const cDoc: CommentDoc = await storage.value.get(cmt.id)
+    cDoc.text = editingCommentText.value
+    await storage.value.put(cDoc)
+    await loadMessagesForCharacter(char.docId, charIndex)
     cancelEditComment()
   } catch (err) {
     console.error('Erreur modification commentaire :', err)
@@ -524,104 +378,100 @@ const deleteComment = async (charIndex: number, msgIndex: number, commentIndex: 
   if (!confirm('Supprimer ce commentaire ?')) return
   try {
     const char = characters.value[charIndex]
-    const doc: CharacterDoc = await storage.value.get(char.docId)
-
-    if (doc.type === 'character') {
-      doc.messages![msgIndex].comments.splice(commentIndex, 1)
-    } else if (Array.isArray(doc.characters) && doc.characters[0]) {
-      doc.characters[0].messages![msgIndex].comments.splice(commentIndex, 1)
-    }
-
-    const response = await storage.value.put(doc)
-    const extracted = extractCharactersFromDoc(doc)
-    characters.value = characters.value.map(c =>
-      c.docId === doc._id ? { data: extracted[0].data, docId: doc._id, docRev: response.rev } : c
-    )
+    const cmt = char.data.messages![msgIndex].comments[commentIndex]
+    const cDoc: CommentDoc = await storage.value.get(cmt.id)
+    await storage.value.remove(cDoc)
+    await loadMessagesForCharacter(char.docId, charIndex)
   } catch (err) {
     console.error('Erreur suppression commentaire :', err)
   }
 }
-
-
 const toggleCommentVisibility = (charIndex: number, msgIndex: number) => {
   const key = `${charIndex}-${msgIndex}`
   visibleComments.value[key] = !visibleComments.value[key]
 }
+
 const searchMessages = async () => {
   if (!storage.value) return
-  if (!searchMessageText.value) {
-    sortByLikes.value = false
-    fetchData()
-    return
-  }
+  const q = (searchMessageText.value || '').trim().toLowerCase()
+  if (!q) { sortByLikes.value = false; await fetchData(); return }
   try {
-    const needle = searchMessageText.value.toLowerCase()
-    const result = await storage.value.allDocs({ include_docs: true })
-    const allCharacters: { data: Character; docId: string; docRev: string }[] = []
-    result.rows.forEach((row: any) => {
-      if (!row.doc) return
-      const extracted = extractCharactersFromDoc(row.doc as CharacterDoc)
-      extracted.forEach((entry) => {
-        entry.data.messages = entry.data.messages || []
-        const found = entry.data.messages.some(m => (m.text || '').toLowerCase().includes(needle))
-        if (found) {
-          allCharacters.push({
-            data: entry.data,
-            docId: entry.docId,
-            docRev: entry.docRev
-          })
-        }
-      })
+    
+    const upper = q + '\uffff'
+    const { docs: msgDocs } = await storage.value.find({
+      selector: { type: 'message', textLower: { $gte: q, $lte: upper } },
+      limit: 500
     })
-    characters.value = allCharacters
+    const messages = msgDocs as MessageDoc[]
+    if (!messages.length) { characters.value = []; return }
+
+    
+    const characterIds = Array.from(new Set(messages.map(m => m.characterId)))
+    const resChars = await storage.value.allDocs({ include_docs: true, keys: characterIds })
+    const charRows = resChars.rows.filter((r: any) => r.doc && !r.error)
+    const charMap = new Map<string, number>()
+    characters.value = charRows.map((row: any, idx: number) => {
+      const d = row.doc as CharacterDoc
+      charMap.set(d._id, idx)
+      return mapCharacterDoc(d)
+    })
+
+    
+    const msgIds = messages.map(m => m._id)
+    const { docs: cmtDocs } = await storage.value.find({
+      selector: { type: 'comment', messageId: { $in: msgIds } }
+    })
+    const commentsByMsg = (cmtDocs as CommentDoc[]).reduce((acc, c) => {
+      const arr = acc.get(c.messageId) || []
+      arr.push(c)
+      acc.set(c.messageId, arr)
+      return acc
+    }, new Map<string, CommentDoc[]>())
+
+    
+    for (const m of messages) {
+      const idx = charMap.get(m.characterId)
+      if (idx === undefined) continue
+      const msgUI: Message = {
+        id: m._id,
+        text: m.text,
+        createdAt: m.createdAt,
+        comments: (commentsByMsg.get(m._id) || [])
+          .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+          .map(c => ({ id: c._id, text: c.text, createdAt: c.createdAt }))
+      }
+      const arr = characters.value[idx].data.messages || []
+      arr.push(msgUI)
+      characters.value[idx].data.messages = arr.sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      )
+    }
   } catch (err) {
     console.error('Erreur recherche messages :', err)
   }
 }
+
 const searchByAffiliation = async () => {
   if (!storage.value) return
-  if (!searchAffiliation.value) {
-    sortByLikes.value = false
-    fetchData()
-    return
-  }
-  const needle = searchAffiliation.value.toLowerCase()
+  const val = (searchAffiliation.value || '').trim().toLowerCase()
+  if (!val) { sortByLikes.value = false; await fetchData(); return }
   try {
-    const result = await storage.value.allDocs({ include_docs: true })
-    const allCharacters: { data: Character; docId: string; docRev: string }[] = []
-    result.rows.forEach((row: any) => {
-      if (!row.doc) return
-      const extracted = extractCharactersFromDoc(row.doc as CharacterDoc)
-      extracted.forEach((entry) => {
-        if ((entry.data.affiliation || '').toLowerCase() === needle) {
-          allCharacters.push({
-            data: entry.data,
-            docId: entry.docId,
-            docRev: entry.docRev
-          })
-        }
-      })
+    const { docs } = await storage.value.find({
+      selector: { type: 'character', affiliationLower: val }
     })
-    characters.value = allCharacters
+    characters.value = (docs as CharacterDoc[]).map(mapCharacterDoc)
+    await reloadAllMessages()
   } catch (err) {
     console.error('Erreur recherche affiliation :', err)
   }
 }
 
 const toggleSortByLikes = async () => {
-  if (sortByLikes.value === true) {
-    sortByLikes.value = false
-    fetchData()
-    return
-  }
-  sortByLikes.value = true
-
-  fetchData(true)
+  if (sortByLikes.value) { sortByLikes.value = false; await fetchData() }
+  else { sortByLikes.value = true; await fetchData(true) }
 }
 
-onMounted(() => {
-  initDatabase()
-})
+onMounted(() => { initDatabase() })
 </script>
 
 <template>
