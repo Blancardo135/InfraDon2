@@ -71,8 +71,12 @@ const editingCommentText = ref('')
 const visibleComments = ref<Record<string, boolean>>({})
 
 const searchMessageText = ref('')
-const sortByLikes = ref(false) // Top 10 messages par likes (global)
+// Mode global "Top 10 messages par likes"
+const sortByLikes = ref(false)
 const searchAffiliation = ref('')
+
+// Tri par likes par personnage (clé: characterId)
+const orderByLikesForChar = ref<Record<string, boolean>>({})
 
 const iso = () => new Date().toISOString()
 
@@ -147,10 +151,13 @@ const createIndexes = async () => {
   if (!storage.value) return
   try {
     await storage.value.createIndex({ index: { fields: ['type'] } })
-    await storage.value.createIndex({ index: { fields: ['type', 'likes'] } }) // utilisé pour tri messages par likes
+    await storage.value.createIndex({ index: { fields: ['type', 'likes'] } }) // tri global messages par likes
     await storage.value.createIndex({ index: { fields: ['type', 'affiliationLower'] } })
     await storage.value.createIndex({ index: { fields: ['type', 'characterId'] } })
+    await storage.value.createIndex({ index: { fields: ['type', 'characterId', 'likes'] } }) // tri par personnage par likes
+    await storage.value.createIndex({ index: { fields: ['type', 'characterId', 'createdAt'] } }) // tri par personnage par date
     await storage.value.createIndex({ index: { fields: ['type', 'textLower'] } })
+    await storage.value.createIndex({ index: { fields: ['type', 'textLower', 'createdAt'] } }) // recherche + tri par date
     await storage.value.createIndex({ index: { fields: ['type', 'messageId'] } })
     console.log('Index Mango créés')
   } catch (err) {
@@ -176,14 +183,24 @@ const mapCharacterDoc = (d: CharacterDoc) => ({
 
 const loadMessagesForCharacter = async (characterId: string, charIndex: number) => {
   if (!storage.value) return
+  const orderByLikes = !!orderByLikesForChar.value[characterId]
+
+  // Tri côté DB: par likes desc OU par date desc
+  const selector: any = { type: 'message', characterId }
+  const sort = orderByLikes
+    ? [{ type: 'asc' }, { characterId: 'asc' }, { likes: 'desc' }]
+    : [{ type: 'asc' }, { characterId: 'asc' }, { createdAt: 'desc' }]
+
+  if (orderByLikes) selector.likes = { $gte: 0 }
+  else selector.createdAt = { $gte: null }
 
   const { docs: messageDocs } = await storage.value.find({
-    selector: { type: 'message', characterId },
+    selector,
+    sort,
     limit: 9999
   })
-  const messages = (messageDocs as MessageDoc[]).sort(
-    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-  )
+  const messages = messageDocs as MessageDoc[]
+
   const messageIds = messages.map(m => m._id)
   let commentsByMsg = new Map<string, CommentDoc[]>()
   if (messageIds.length) {
@@ -198,6 +215,7 @@ const loadMessagesForCharacter = async (characterId: string, charIndex: number) 
       return acc
     }, new Map<string, CommentDoc[]>())
   }
+
   const uiMessages: Message[] = messages.map(m => ({
     id: m._id,
     text: m.text,
@@ -449,7 +467,7 @@ const likeCharacter = async (charIndex: number) => {
   }
 }
 
-// Nouveau: like d'un message (avec gestion des conflits)
+// Like d'un message (avec gestion des conflits)
 const likeMessage = async (charIndex: number, msgIndex: number) => {
   if (!storage.value) return
   try {
@@ -463,8 +481,7 @@ const likeMessage = async (charIndex: number, msgIndex: number) => {
     )
     if (updated) {
       if (sortByLikes.value) {
-        // on est en mode "Top 10 messages", on rafraîchit la vue globale
-        await fetchData(true)
+        await fetchData(true) // en mode Top 10 global
       } else {
         await loadMessagesForCharacter(characters.value[charIndex].docId, charIndex)
       }
@@ -544,14 +561,23 @@ const toggleCommentVisibility = (charIndex: number, msgIndex: number) => {
   visibleComments.value[key] = !visibleComments.value[key]
 }
 
+const toggleCharSort = async (charIndex: number) => {
+  const char = characters.value[charIndex]
+  const id = char.docId
+  orderByLikesForChar.value[id] = !orderByLikesForChar.value[id]
+  await loadMessagesForCharacter(id, charIndex)
+}
+
 const searchMessages = async () => {
   if (!storage.value) return
   const q = (searchMessageText.value || '').trim().toLowerCase()
   if (!q) { sortByLikes.value = false; await fetchData(); return }
   try {
     const upper = q + '\uffff'
+    // Recherche + tri par date côté DB
     const { docs: msgDocs } = await storage.value.find({
-      selector: { type: 'message', textLower: { $gte: q, $lte: upper } },
+      selector: { type: 'message', textLower: { $gte: q, $lte: upper }, createdAt: { $gte: null } },
+      sort: [{ type: 'asc' }, { textLower: 'asc' }, { createdAt: 'desc' }],
       limit: 500
     })
     const messages = msgDocs as MessageDoc[]
@@ -595,9 +621,8 @@ const searchMessages = async () => {
       }
       const arr = characters.value[idx].data.messages || []
       arr.push(msgUI)
-      characters.value[idx].data.messages = arr.sort(
-        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-      )
+      // Pas de tri en TS: ordre déjà géré par Mango
+      characters.value[idx].data.messages = arr
     }
   } catch (err) {
     console.error('Erreur recherche messages :', err)
@@ -710,7 +735,17 @@ onMounted(() => { initDatabase() })
         </div>
 
         <div class="mt-4 pl-4 border-l-2 border-gray-300">
-          <h3 class="font-semibold">Messages</h3>
+          <div class="flex items-center justify-between">
+            <h3 class="font-semibold">Messages</h3>
+            <button
+              @click="toggleCharSort(index)"
+              class="text-xs px-2 py-1 rounded border"
+              :class="orderByLikesForChar[char.docId] ? 'bg-yellow-50 border-yellow-300 text-yellow-700' : 'bg-gray-50 border-gray-300 text-gray-700'"
+              :title="orderByLikesForChar[char.docId] ? 'Trier par Date (desc)' : 'Trier par Likes (desc)'"
+            >
+              {{ orderByLikesForChar[char.docId] ? 'Tri: Likes ↓' : 'Tri: Date ↓' }}
+            </button>
+          </div>
           
           <div class="flex items-center space-x-2 mt-2">
             <input v-model="newMessageText[index]" placeholder="Nouveau message..." class="border p-2 rounded flex-1" />
