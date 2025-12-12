@@ -4,9 +4,8 @@ import PouchDB from 'pouchdb'
 import PouchDBFind from 'pouchdb-find'
 PouchDB.plugin(PouchDBFind)
 
-
 interface Comment { id: string; text: string; createdAt: string }
-interface Message { id: string; text: string; createdAt: string; comments: Comment[] }
+interface Message { id: string; text: string; createdAt: string; likes: number; comments: Comment[] }
 interface Character {
   name: string
   age: number
@@ -16,7 +15,7 @@ interface Character {
   messages?: Message[]
 }
 
-//pour pouchdb
+// pour pouchdb
 interface CharacterDoc {
   _id: string
   _rev?: string
@@ -37,6 +36,7 @@ interface MessageDoc {
   text: string
   textLower: string
   createdAt: string
+  likes: number
 }
 
 interface CommentDoc {
@@ -71,11 +71,69 @@ const editingCommentText = ref('')
 const visibleComments = ref<Record<string, boolean>>({})
 
 const searchMessageText = ref('')
-const sortByLikes = ref(false)
+const sortByLikes = ref(false) // Top 10 messages par likes (global)
 const searchAffiliation = ref('')
 
 const iso = () => new Date().toISOString()
 
+// =====================
+// Gestion générique des conflits
+// =====================
+const saveWithConflictRetry = async <T extends { _id: string; _rev?: string }>(
+  getLatestDoc: () => Promise<T>,
+  mergeFn: (latest: T) => T,
+  maxRetries = 3
+): Promise<T | null> => {
+  if (!storage.value) return null
+  let attempt = 0
+  let lastError: any = null
+  while (attempt < maxRetries) {
+    try {
+      const latestDoc = await getLatestDoc()
+      const mergedDoc = mergeFn(latestDoc)
+      const res = await storage.value.put(mergedDoc)
+      return { ...mergedDoc, _rev: res.rev }
+    } catch (err: any) {
+      lastError = err
+      if (err?.status === 409) {
+        console.warn('Conflit détecté, tentative de résolution...', { attempt: attempt + 1, id: (err as any)?.id })
+        attempt++
+        continue
+      } else {
+        console.error('Erreur non liée à un conflit :', err)
+        break
+      }
+    }
+  }
+  console.error('Échec de résolution de conflit après plusieurs tentatives :', lastError)
+  return null
+}
+
+const removeWithRetry = async (id: string, maxRetries = 3) => {
+  if (!storage.value) return false
+  let attempt = 0
+  let lastError: any = null
+  while (attempt < maxRetries) {
+    try {
+      const d = await storage.value.get(id)
+      await storage.value.remove(d)
+      return true
+    } catch (err: any) {
+      lastError = err
+      if (err?.status === 409) {
+        attempt++
+        continue
+      } else {
+        console.error('Erreur suppression doc :', err)
+        break
+      }
+    }
+  }
+  console.error('Échec de suppression après plusieurs tentatives :', lastError)
+  return false
+}
+
+// =====================
 
 const initDatabase = async () => {
   const localDB = new PouchDB('infradon-blaro')
@@ -88,9 +146,8 @@ const initDatabase = async () => {
 const createIndexes = async () => {
   if (!storage.value) return
   try {
-    
     await storage.value.createIndex({ index: { fields: ['type'] } })
-    await storage.value.createIndex({ index: { fields: ['type', 'likes'] } })
+    await storage.value.createIndex({ index: { fields: ['type', 'likes'] } }) // utilisé pour tri messages par likes
     await storage.value.createIndex({ index: { fields: ['type', 'affiliationLower'] } })
     await storage.value.createIndex({ index: { fields: ['type', 'characterId'] } })
     await storage.value.createIndex({ index: { fields: ['type', 'textLower'] } })
@@ -101,17 +158,15 @@ const createIndexes = async () => {
   }
 }
 
-
 const startSync = () => {
   if (!storage.value || syncHandler) return
   syncHandler = storage.value
     .sync(COUCH_REMOTE, { live: true, retry: true })
-    .on('change', async () => { await fetchData(sortByLikes.value) })
+    .on('change', async () => { await fetchData(sortByLikes.value) }) // conserve la mécanique
     .on('error', (err: any) => console.error('Erreur sync :', err))
 }
 const stopSync = () => { if (syncHandler?.cancel) { syncHandler.cancel(); syncHandler = null } }
 const toggleOnline = () => { isOnline.value = !isOnline.value; isOnline.value ? startSync() : stopSync() }
-
 
 const mapCharacterDoc = (d: CharacterDoc) => ({
   data: { name: d.name, age: d.age, affiliation: d.affiliation, lightsaber: !!d.lightsaber, likes: d.likes ?? 0, messages: [] },
@@ -123,7 +178,8 @@ const loadMessagesForCharacter = async (characterId: string, charIndex: number) 
   if (!storage.value) return
 
   const { docs: messageDocs } = await storage.value.find({
-    selector: { type: 'message', characterId }
+    selector: { type: 'message', characterId },
+    limit: 9999
   })
   const messages = (messageDocs as MessageDoc[]).sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
@@ -132,7 +188,8 @@ const loadMessagesForCharacter = async (characterId: string, charIndex: number) 
   let commentsByMsg = new Map<string, CommentDoc[]>()
   if (messageIds.length) {
     const { docs: commentDocs } = await storage.value.find({
-      selector: { type: 'comment', messageId: { $in: messageIds } }
+      selector: { type: 'comment', messageId: { $in: messageIds } },
+      limit: 9999
     })
     commentsByMsg = (commentDocs as CommentDoc[]).reduce((acc, c) => {
       const arr = acc.get(c.messageId) || []
@@ -145,6 +202,7 @@ const loadMessagesForCharacter = async (characterId: string, charIndex: number) 
     id: m._id,
     text: m.text,
     createdAt: m.createdAt,
+    likes: m.likes ?? 0,
     comments: (commentsByMsg.get(m._id) || [])
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
       .map(c => ({ id: c._id, text: c.text, createdAt: c.createdAt }))
@@ -159,30 +217,75 @@ const reloadAllMessages = async () => {
   }
 }
 
-
-const fetchData = async (onlyTop = false) => {
+const fetchData = async (onlyTopMessagesByLikes = false) => {
   if (!storage.value) return
   try {
-    if (onlyTop) {
-      const { docs } = await storage.value.find({
-        selector: { type: 'character', likes: { $gte: 0 } },
+    if (onlyTopMessagesByLikes) {
+      // Top 10 messages par likes (tri côté DB)
+      const { docs: msgDocs } = await storage.value.find({
+        selector: { type: 'message', likes: { $gte: 0 } },
         sort: [{ likes: 'desc' }],
         limit: 10
       })
-      characters.value = (docs as CharacterDoc[]).map(mapCharacterDoc)
+      const messages = msgDocs as MessageDoc[]
+      if (!messages.length) { characters.value = []; return }
+
+      const characterIds = Array.from(new Set(messages.map(m => m.characterId)))
+      const { docs: charDocs } = await storage.value.find({
+        selector: { _id: { $in: characterIds } },
+        limit: characterIds.length
+      })
+      const charMap = new Map<string, number>()
+      characters.value = (charDocs as CharacterDoc[])
+        .filter(d => (d as any).type === 'character')
+        .map((d, idx) => {
+          charMap.set(d._id, idx)
+          return mapCharacterDoc(d)
+        })
+
+      const msgIds = messages.map(m => m._id)
+      const { docs: cmtDocs } = await storage.value.find({
+        selector: { type: 'comment', messageId: { $in: msgIds } },
+        limit: 9999
+      })
+      const commentsByMsg = (cmtDocs as CommentDoc[]).reduce((acc, c) => {
+        const arr = acc.get(c.messageId) || []
+        arr.push(c)
+        acc.set(c.messageId, arr)
+        return acc
+      }, new Map<string, CommentDoc[]>())
+
+      for (const m of messages) {
+        const idx = charMap.get(m.characterId)
+        if (idx === undefined) continue
+        const msgUI: Message = {
+          id: m._id,
+          text: m.text,
+          createdAt: m.createdAt,
+          likes: m.likes ?? 0,
+          comments: (commentsByMsg.get(m._id) || [])
+            .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+            .map(c => ({ id: c._id, text: c.text, createdAt: c.createdAt }))
+        }
+        const arr = characters.value[idx].data.messages || []
+        arr.push(msgUI)
+        characters.value[idx].data.messages = arr
+      }
     } else {
+      // Liste complète des personnages + messages
       const { docs } = await storage.value.find({
-        selector: { type: 'character' }
+        selector: { type: 'character' },
+        limit: 9999
       })
       characters.value = (docs as CharacterDoc[]).map(mapCharacterDoc)
+      await reloadAllMessages()
     }
-    await reloadAllMessages()
   } catch (err) {
-    console.error('Erreur fetch personnages :', err)
+    console.error('Erreur fetch data :', err)
   }
 }
 
-//crud
+// CRUD
 const addCharacter = async () => {
   if (!storage.value) return
   try {
@@ -211,16 +314,25 @@ const saveEdit = async (index: number) => {
   if (!storage.value || !editingCharacter.value) return
   try {
     const curr = characters.value[index]
-    const doc: CharacterDoc = await storage.value.get(curr.docId)
-    doc.name = editingCharacter.value.name
-    doc.age = editingCharacter.value.age
-    doc.affiliation = editingCharacter.value.affiliation
-    doc.affiliationLower = (editingCharacter.value.affiliation || '').toLowerCase()
-    doc.lightsaber = editingCharacter.value.lightsaber
-    if (typeof editingCharacter.value.likes === 'number') doc.likes = editingCharacter.value.likes
-    const res = await storage.value.put(doc)
-    characters.value[index] = mapCharacterDoc({ ...doc, _rev: res.rev })
-    await loadMessagesForCharacter(curr.docId, index)
+    const updated = await saveWithConflictRetry<CharacterDoc>(
+      () => storage.value.get(curr.docId),
+      latest => {
+        latest.name = editingCharacter.value!.name
+        latest.age = editingCharacter.value!.age
+        latest.affiliation = editingCharacter.value!.affiliation
+        latest.affiliationLower = (editingCharacter.value!.affiliation || '').toLowerCase()
+        latest.lightsaber = editingCharacter.value!.lightsaber
+        if (typeof editingCharacter.value!.likes === 'number') {
+          // éviter d'écraser une éventuelle mise à jour distante des likes
+          latest.likes = Math.max(latest.likes ?? 0, editingCharacter.value!.likes ?? 0)
+        }
+        return latest
+      }
+    )
+    if (updated) {
+      characters.value[index] = mapCharacterDoc(updated)
+      await loadMessagesForCharacter(curr.docId, index)
+    }
     cancelEdit()
   } catch (err) {
     console.error('Erreur modification personnage :', err)
@@ -233,23 +345,21 @@ const deleteCharacter = async (index: number) => {
   try {
     const curr = characters.value[index]
     const characterId = curr.docId
-    const { docs: msgDocs } = await storage.value.find({ selector: { type: 'message', characterId } })
+    const { docs: msgDocs } = await storage.value.find({ selector: { type: 'message', characterId }, limit: 9999 })
     const msgs = msgDocs as MessageDoc[]
     if (msgs.length) {
       const msgIds = msgs.map(m => m._id)
-      const { docs: cmtDocs } = await storage.value.find({ selector: { type: 'comment', messageId: { $in: msgIds } } })
+      const { docs: cmtDocs } = await storage.value.find({ selector: { type: 'comment', messageId: { $in: msgIds } }, limit: 9999 })
       const cmts = cmtDocs as CommentDoc[]
       if (cmts.length) await storage.value.bulkDocs(cmts.map(c => ({ ...c, _deleted: true })))
       await storage.value.bulkDocs(msgs.map(m => ({ ...m, _deleted: true })))
     }
-    const charDoc = await storage.value.get(characterId)
-    await storage.value.remove(charDoc)
+    await removeWithRetry(characterId)
     characters.value.splice(index, 1)
   } catch (err) {
     console.error('Erreur suppression personnage :', err)
   }
 }
-
 
 const addMessage = async (charIndex: number) => {
   if (!storage.value) return
@@ -263,7 +373,8 @@ const addMessage = async (charIndex: number) => {
       characterId: char.docId,
       text,
       textLower: text.toLowerCase(),
-      createdAt: iso()
+      createdAt: iso(),
+      likes: 0
     }
     await storage.value.put(msg)
     await loadMessagesForCharacter(char.docId, charIndex)
@@ -284,11 +395,17 @@ const saveEditMessage = async () => {
   try {
     const { charIndex, msgIndex } = editingMessageIndex.value
     const msg = characters.value[charIndex].data.messages![msgIndex]
-    const doc: MessageDoc = await storage.value.get(msg.id)
-    doc.text = editingMessageText.value
-    doc.textLower = editingMessageText.value.toLowerCase()
-    await storage.value.put(doc)
-    await loadMessagesForCharacter(characters.value[charIndex].docId, charIndex)
+    const updated = await saveWithConflictRetry<MessageDoc>(
+      () => storage.value.get(msg.id),
+      latest => {
+        latest.text = editingMessageText.value
+        latest.textLower = editingMessageText.value.toLowerCase()
+        return latest
+      }
+    )
+    if (updated) {
+      await loadMessagesForCharacter(characters.value[charIndex].docId, charIndex)
+    }
     cancelEditMessage()
   } catch (err) {
     console.error('Erreur modification message :', err)
@@ -301,32 +418,62 @@ const deleteMessage = async (charIndex: number, msgIndex: number) => {
   try {
     const char = characters.value[charIndex]
     const msg = char.data.messages![msgIndex]
-    const { docs: cmtDocs } = await storage.value.find({ selector: { type: 'comment', messageId: msg.id } })
+    const { docs: cmtDocs } = await storage.value.find({ selector: { type: 'comment', messageId: msg.id }, limit: 9999 })
     const cmts = cmtDocs as CommentDoc[]
     if (cmts.length) await storage.value.bulkDocs(cmts.map(c => ({ ...c, _deleted: true })))
-    const msgDoc: MessageDoc = await storage.value.get(msg.id)
-    await storage.value.remove(msgDoc)
+    await removeWithRetry(msg.id)
     await loadMessagesForCharacter(char.docId, charIndex)
   } catch (err) {
     console.error('Erreur suppression message :', err)
   }
 }
 
-
 const likeCharacter = async (charIndex: number) => {
   if (!storage.value) return
   try {
     const curr = characters.value[charIndex]
-    const doc: CharacterDoc = await storage.value.get(curr.docId)
-    doc.likes = (doc.likes ?? 0) + 1
-    const res = await storage.value.put(doc)
-    characters.value[charIndex] = mapCharacterDoc({ ...doc, _rev: res.rev })
-    if (sortByLikes.value) setTimeout(() => fetchData(true), 120)
-    else await loadMessagesForCharacter(curr.docId, charIndex)
+    const updated = await saveWithConflictRetry<CharacterDoc>(
+      () => storage.value.get(curr.docId),
+      latest => {
+        latest.likes = (latest.likes ?? 0) + 1
+        return latest
+      }
+    )
+    if (updated) {
+      characters.value[charIndex] = mapCharacterDoc(updated)
+      if (sortByLikes.value) setTimeout(() => fetchData(true), 120)
+      else await loadMessagesForCharacter(curr.docId, charIndex)
+    }
   } catch (err) {
     console.error('Erreur like personnage :', err)
   }
 }
+
+// Nouveau: like d'un message (avec gestion des conflits)
+const likeMessage = async (charIndex: number, msgIndex: number) => {
+  if (!storage.value) return
+  try {
+    const msg = characters.value[charIndex].data.messages![msgIndex]
+    const updated = await saveWithConflictRetry<MessageDoc>(
+      () => storage.value.get(msg.id),
+      latest => {
+        latest.likes = (latest.likes ?? 0) + 1
+        return latest
+      }
+    )
+    if (updated) {
+      if (sortByLikes.value) {
+        // on est en mode "Top 10 messages", on rafraîchit la vue globale
+        await fetchData(true)
+      } else {
+        await loadMessagesForCharacter(characters.value[charIndex].docId, charIndex)
+      }
+    }
+  } catch (err) {
+    console.error('Erreur like message :', err)
+  }
+}
+
 const addComment = async (charIndex: number, msgIndex: number) => {
   if (!storage.value) return
   const key = `${charIndex}-${msgIndex}`
@@ -363,10 +510,16 @@ const saveEditComment = async () => {
     const { charIndex, msgIndex, commentIndex } = editingCommentIndex.value
     const char = characters.value[charIndex]
     const cmt = char.data.messages![msgIndex].comments[commentIndex]
-    const cDoc: CommentDoc = await storage.value.get(cmt.id)
-    cDoc.text = editingCommentText.value
-    await storage.value.put(cDoc)
-    await loadMessagesForCharacter(char.docId, charIndex)
+    const updated = await saveWithConflictRetry<CommentDoc>(
+      () => storage.value.get(cmt.id),
+      latest => {
+        latest.text = editingCommentText.value
+        return latest
+      }
+    )
+    if (updated) {
+      await loadMessagesForCharacter(char.docId, charIndex)
+    }
     cancelEditComment()
   } catch (err) {
     console.error('Erreur modification commentaire :', err)
@@ -379,13 +532,13 @@ const deleteComment = async (charIndex: number, msgIndex: number, commentIndex: 
   try {
     const char = characters.value[charIndex]
     const cmt = char.data.messages![msgIndex].comments[commentIndex]
-    const cDoc: CommentDoc = await storage.value.get(cmt.id)
-    await storage.value.remove(cDoc)
+    await removeWithRetry(cmt.id)
     await loadMessagesForCharacter(char.docId, charIndex)
   } catch (err) {
     console.error('Erreur suppression commentaire :', err)
   }
 }
+
 const toggleCommentVisibility = (charIndex: number, msgIndex: number) => {
   const key = `${charIndex}-${msgIndex}`
   visibleComments.value[key] = !visibleComments.value[key]
@@ -396,7 +549,6 @@ const searchMessages = async () => {
   const q = (searchMessageText.value || '').trim().toLowerCase()
   if (!q) { sortByLikes.value = false; await fetchData(); return }
   try {
-    
     const upper = q + '\uffff'
     const { docs: msgDocs } = await storage.value.find({
       selector: { type: 'message', textLower: { $gte: q, $lte: upper } },
@@ -405,21 +557,22 @@ const searchMessages = async () => {
     const messages = msgDocs as MessageDoc[]
     if (!messages.length) { characters.value = []; return }
 
-    
     const characterIds = Array.from(new Set(messages.map(m => m.characterId)))
-    const resChars = await storage.value.allDocs({ include_docs: true, keys: characterIds })
-    const charRows = resChars.rows.filter((r: any) => r.doc && !r.error)
+    const { docs: charDocs } = await storage.value.find({
+      selector: { _id: { $in: characterIds } },
+      limit: characterIds.length
+    })
+    const charRows = (charDocs as CharacterDoc[]).filter((d: any) => d?.type === 'character')
     const charMap = new Map<string, number>()
-    characters.value = charRows.map((row: any, idx: number) => {
-      const d = row.doc as CharacterDoc
+    characters.value = charRows.map((d: CharacterDoc, idx: number) => {
       charMap.set(d._id, idx)
       return mapCharacterDoc(d)
     })
 
-    
     const msgIds = messages.map(m => m._id)
     const { docs: cmtDocs } = await storage.value.find({
-      selector: { type: 'comment', messageId: { $in: msgIds } }
+      selector: { type: 'comment', messageId: { $in: msgIds } },
+      limit: 9999
     })
     const commentsByMsg = (cmtDocs as CommentDoc[]).reduce((acc, c) => {
       const arr = acc.get(c.messageId) || []
@@ -428,7 +581,6 @@ const searchMessages = async () => {
       return acc
     }, new Map<string, CommentDoc[]>())
 
-    
     for (const m of messages) {
       const idx = charMap.get(m.characterId)
       if (idx === undefined) continue
@@ -436,6 +588,7 @@ const searchMessages = async () => {
         id: m._id,
         text: m.text,
         createdAt: m.createdAt,
+        likes: m.likes ?? 0,
         comments: (commentsByMsg.get(m._id) || [])
           .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
           .map(c => ({ id: c._id, text: c.text, createdAt: c.createdAt }))
@@ -457,7 +610,8 @@ const searchByAffiliation = async () => {
   if (!val) { sortByLikes.value = false; await fetchData(); return }
   try {
     const { docs } = await storage.value.find({
-      selector: { type: 'character', affiliationLower: val }
+      selector: { type: 'character', affiliationLower: val },
+      limit: 9999
     })
     characters.value = (docs as CharacterDoc[]).map(mapCharacterDoc)
     await reloadAllMessages()
@@ -523,7 +677,7 @@ onMounted(() => { initDatabase() })
       class="mt-2 px-4 py-2 rounded text-white transition"
       :class="sortByLikes ? 'bg-yellow-600 ring-2 ring-yellow-400' : 'bg-gray-500 hover:bg-gray-600'"
     >
-      {{ sortByLikes ? 'Top 10 Likes Activé (Cliquez pour désactiver)' : 'Afficher le Top 10 Likes' }}
+      {{ sortByLikes ? 'Top 10 Messages par Likes (Cliquez pour désactiver)' : 'Afficher le Top 10 Messages par Likes' }}
     </button>
   </div>
 
@@ -576,8 +730,20 @@ onMounted(() => { initDatabase() })
               </div>
             </div>
             <div v-else>
-              <p>{{ msg.text }}</p>
-              <p class="text-sm text-gray-500">Posté le {{ new Date(msg.createdAt).toLocaleString() }}</p>
+              <div class="flex items-center justify-between">
+                <div>
+                  <p>{{ msg.text }}</p>
+                  <p class="text-sm text-gray-500">Posté le {{ new Date(msg.createdAt).toLocaleString() }}</p>
+                </div>
+                <button 
+                  @click="likeMessage(index, msgIndex)" 
+                  class="bg-pink-500 text-white px-2 py-1 rounded text-xs flex items-center space-x-1"
+                >
+                  <span>❤️</span>
+                  <span>{{ msg.likes || 0 }}</span>
+                </button>
+              </div>
+
               <div class="mt-2 space-x-2">
                 <button @click="startEditMessage(index, msgIndex)" class="bg-green-500 text-white px-2 py-1 rounded text-xs">Modifier</button>
                 <button @click="deleteMessage(index, msgIndex)" class="bg-red-500 text-white px-2 py-1 rounded text-xs">Supprimer</button>
