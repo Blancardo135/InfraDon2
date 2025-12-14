@@ -71,18 +71,16 @@ const editingCommentText = ref('')
 const visibleComments = ref<Record<string, boolean>>({})
 
 const searchMessageText = ref('')
-// Mode global "Top 10 messages par likes"
+
 const sortByLikes = ref(false)
 const searchAffiliation = ref('')
 
-// Tri par likes par personnage (clé: characterId)
+
 const orderByLikesForChar = ref<Record<string, boolean>>({})
 
 const iso = () => new Date().toISOString()
 
-// =====================
-// Gestion générique des conflits
-// =====================
+
 const saveWithConflictRetry = async <T extends { _id: string; _rev?: string }>(
   getLatestDoc: () => Promise<T>,
   mergeFn: (latest: T) => T,
@@ -137,7 +135,7 @@ const removeWithRetry = async (id: string, maxRetries = 3) => {
   return false
 }
 
-// =====================
+
 
 const initDatabase = async () => {
   const localDB = new PouchDB('infradon-blaro')
@@ -151,13 +149,13 @@ const createIndexes = async () => {
   if (!storage.value) return
   try {
     await storage.value.createIndex({ index: { fields: ['type'] } })
-    await storage.value.createIndex({ index: { fields: ['type', 'likes'] } }) // tri global messages par likes
+    await storage.value.createIndex({ index: { fields: ['type', 'likes'] } })
     await storage.value.createIndex({ index: { fields: ['type', 'affiliationLower'] } })
     await storage.value.createIndex({ index: { fields: ['type', 'characterId'] } })
-    await storage.value.createIndex({ index: { fields: ['type', 'characterId', 'likes'] } }) // tri par personnage par likes
-    await storage.value.createIndex({ index: { fields: ['type', 'characterId', 'createdAt'] } }) // tri par personnage par date
+    await storage.value.createIndex({ index: { fields: ['type', 'characterId', 'likes'] } }) 
+    await storage.value.createIndex({ index: { fields: ['type', 'characterId', 'createdAt'] } }) 
     await storage.value.createIndex({ index: { fields: ['type', 'textLower'] } })
-    await storage.value.createIndex({ index: { fields: ['type', 'textLower', 'createdAt'] } }) // recherche + tri par date
+    await storage.value.createIndex({ index: { fields: ['type', 'textLower', 'createdAt'] } }) 
     await storage.value.createIndex({ index: { fields: ['type', 'messageId'] } })
     console.log('Index Mango créés')
   } catch (err) {
@@ -169,7 +167,7 @@ const startSync = () => {
   if (!storage.value || syncHandler) return
   syncHandler = storage.value
     .sync(COUCH_REMOTE, { live: true, retry: true })
-    .on('change', async () => { await fetchData(sortByLikes.value) }) // conserve la mécanique
+    .on('change', async () => { await fetchData(sortByLikes.value) })
     .on('error', (err: any) => console.error('Erreur sync :', err))
 }
 const stopSync = () => { if (syncHandler?.cancel) { syncHandler.cancel(); syncHandler = null } }
@@ -185,7 +183,7 @@ const loadMessagesForCharacter = async (characterId: string, charIndex: number) 
   if (!storage.value) return
   const orderByLikes = !!orderByLikesForChar.value[characterId]
 
-  // Tri côté DB: par likes desc OU par date desc
+  
   const selector: any = { type: 'message', characterId }
   const sort = orderByLikes
     ? [{ type: 'asc' }, { characterId: 'asc' }, { likes: 'desc' }]
@@ -239,7 +237,6 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
   if (!storage.value) return
   try {
     if (onlyTopMessagesByLikes) {
-      // Top 10 messages par likes (tri côté DB)
       const { docs: msgDocs } = await storage.value.find({
         selector: { type: 'message', likes: { $gte: 0 } },
         sort: [{ likes: 'desc' }],
@@ -255,12 +252,13 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
       })
       const charMap = new Map<string, number>()
       characters.value = (charDocs as CharacterDoc[])
-        .filter(d => (d as any).type === 'character')
+        .filter(d => d.type === 'character')
         .map((d, idx) => {
           charMap.set(d._id, idx)
           return mapCharacterDoc(d)
         })
 
+     
       const msgIds = messages.map(m => m._id)
       const { docs: cmtDocs } = await storage.value.find({
         selector: { type: 'comment', messageId: { $in: msgIds } },
@@ -273,6 +271,7 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
         return acc
       }, new Map<string, CommentDoc[]>())
 
+      
       for (const m of messages) {
         const idx = charMap.get(m.characterId)
         if (idx === undefined) continue
@@ -285,12 +284,10 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
             .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
             .map(c => ({ id: c._id, text: c.text, createdAt: c.createdAt }))
         }
-        const arr = characters.value[idx].data.messages || []
-        arr.push(msgUI)
-        characters.value[idx].data.messages = arr
+        characters.value[idx].data.messages = [msgUI, ...(characters.value[idx].data.messages || []).filter(x => x.id !== msgUI.id)]
       }
     } else {
-      // Liste complète des personnages + messages
+      
       const { docs } = await storage.value.find({
         selector: { type: 'character' },
         limit: 9999
@@ -302,6 +299,7 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
     console.error('Erreur fetch data :', err)
   }
 }
+
 
 // CRUD
 const addCharacter = async () => {
@@ -341,7 +339,7 @@ const saveEdit = async (index: number) => {
         latest.affiliationLower = (editingCharacter.value!.affiliation || '').toLowerCase()
         latest.lightsaber = editingCharacter.value!.lightsaber
         if (typeof editingCharacter.value!.likes === 'number') {
-          // éviter d'écraser une éventuelle mise à jour distante des likes
+          
           latest.likes = Math.max(latest.likes ?? 0, editingCharacter.value!.likes ?? 0)
         }
         return latest
@@ -467,7 +465,7 @@ const likeCharacter = async (charIndex: number) => {
   }
 }
 
-// Like d'un message (avec gestion des conflits)
+
 const likeMessage = async (charIndex: number, msgIndex: number) => {
   if (!storage.value) return
   try {
@@ -481,7 +479,7 @@ const likeMessage = async (charIndex: number, msgIndex: number) => {
     )
     if (updated) {
       if (sortByLikes.value) {
-        await fetchData(true) // en mode Top 10 global
+        await fetchData(true)
       } else {
         await loadMessagesForCharacter(characters.value[charIndex].docId, charIndex)
       }
@@ -574,7 +572,7 @@ const searchMessages = async () => {
   if (!q) { sortByLikes.value = false; await fetchData(); return }
   try {
     const upper = q + '\uffff'
-    // Recherche + tri par date côté DB
+    
     const { docs: msgDocs } = await storage.value.find({
       selector: { type: 'message', textLower: { $gte: q, $lte: upper }, createdAt: { $gte: null } },
       sort: [{ type: 'asc' }, { textLower: 'asc' }, { createdAt: 'desc' }],
@@ -621,7 +619,7 @@ const searchMessages = async () => {
       }
       const arr = characters.value[idx].data.messages || []
       arr.push(msgUI)
-      // Pas de tri en TS: ordre déjà géré par Mango
+      
       characters.value[idx].data.messages = arr
     }
   } catch (err) {
