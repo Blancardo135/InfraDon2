@@ -847,3 +847,130 @@ onMounted(() => { initDatabase() })
     </article>
   </section>
 </template>
+
+<style scoped>
+/*css plus propre*/
+:host,
+:root {
+  display: block;
+  padding-top: 2rem;
+}
+
+h1 {
+  margin-bottom: 2rem;
+  letter-spacing: -0.03em;
+}
+
+
+form,
+.p-4.mb-6.border.rounded.bg-gray-50 {
+  margin-bottom: 2.5rem;
+  padding: 1.5rem;
+}
+
+form h2,
+.p-4.mb-6.border.rounded.bg-gray-50 h2 {
+  margin-bottom: 1rem;
+}
+
+
+form input,
+form label,
+.p-4.mb-6.border.rounded.bg-gray-50 input,
+.p-4.mb-6.border.rounded.bg-gray-50 button {
+  margin-top: 0.5rem;
+}
+
+/*perso*/
+section {
+  display: flex;
+  flex-direction: column;
+  gap: 2.25rem;
+}
+
+article {
+  padding: 1.75rem;
+  background: linear-gradient(180deg, #ffffff, #fafafa);
+  border-radius: 16px;
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.06);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+article:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 20px 42px rgba(0, 0, 0, 0.08);
+}
+
+
+article h2 {
+  margin-bottom: 0.5rem;
+  font-size: 1.05rem;
+}
+
+
+article p {
+  margin-top: 0.25rem;
+  font-size: 0.85rem;
+}
+
+
+button {
+  margin-top: 0.4rem;
+  font-size: 0.72rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 6px;
+}
+
+
+article .space-x-2 > * {
+  margin-right: 0.4rem;
+}
+
+
+article .border-l-2 {
+  margin-top: 1.5rem;
+  padding-left: 1.25rem;
+}
+
+
+article .flex.items-center.space-x-2.mt-2 {
+  margin-top: 1rem;
+}
+
+
+article .bg-white {
+  margin-top: 1.25rem;
+  padding: 1rem;
+  border-radius: 12px;
+}
+
+
+article .border-l {
+  margin-top: 1rem;
+  padding-left: 1rem;
+}
+
+
+.bg-gray-50 {
+  margin-top: 0.6rem;
+  padding: 0.6rem;
+  border-radius: 8px;
+}
+
+.text-blue-600 {
+  margin-top: 0.75rem;
+  display: inline-block;
+}
+
+
+.p-4.mb-6.border.rounded.bg-gray-50 {
+  margin-top: 2rem;
+}
+
+button.bg-green-600,
+button.bg-gray-600 {
+  margin-bottom: 2rem;
+}
+</style>
+
