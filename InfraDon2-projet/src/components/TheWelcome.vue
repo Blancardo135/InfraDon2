@@ -264,27 +264,35 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
   if (!storage.value) return
   try {
     if (onlyTopMessagesByLikes) {
+      
       const { docs: msgDocs } = await storage.value.find({
         selector: { type: 'message', likes: { $gte: 0 } },
-        sort: [{ likes: 'desc' }],
+        sort: [{ type: 'asc' }, { likes: 'desc' }],
         limit: 10
       })
       const messages = msgDocs as MessageDoc[]
-      if (!messages.length) { characters.value = []; return }
 
+      if (!messages.length) {
+        characters.value = []
+        return
+      }
+
+      
       const characterIds = Array.from(new Set(messages.map(m => m.characterId)))
       const { docs: charDocs } = await storage.value.find({
         selector: { _id: { $in: characterIds } },
         limit: characterIds.length
       })
-      const charMap = new Map<string, number>()
-      characters.value = (charDocs as CharacterDoc[])
-        .filter(d => d.type === 'character')
-        .map((d, idx) => {
-          charMap.set(d._id, idx)
-          return mapCharacterDoc(d)
-        })
 
+      const charDocsFiltered = (charDocs as CharacterDoc[]).filter(d => d.type === 'character')
+      const charMap = new Map<string, number>()
+
+      characters.value = charDocsFiltered.map((d, idx) => {
+        charMap.set(d._id, idx)
+        return mapCharacterDoc(d)
+      })
+
+      
       const msgIds = messages.map(m => m._id)
       const { docs: cmtDocs } = await storage.value.find({
         selector: { type: 'comment', messageId: { $in: msgIds } },
@@ -297,9 +305,11 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
         return acc
       }, new Map<string, CommentDoc[]>())
 
+      
       for (const m of messages) {
         const idx = charMap.get(m.characterId)
         if (idx === undefined) continue
+
         const msgUI: Message = {
           id: m._id,
           text: m.text,
@@ -309,9 +319,14 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
             .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
             .map(c => ({ id: c._id, text: c.text, createdAt: c.createdAt }))
         }
-        characters.value[idx].data.messages = [msgUI, ...(characters.value[idx].data.messages || []).filter(x => x.id !== msgUI.id)]
+
+        
+        const arr = characters.value[idx].data.messages || []
+        arr.push(msgUI)
+        characters.value[idx].data.messages = arr
       }
     } else {
+      
       const { docs } = await storage.value.find({
         selector: { type: 'character' },
         limit: 9999
