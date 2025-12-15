@@ -50,7 +50,11 @@ interface CommentDoc {
 
 const COUCH_REMOTE = 'http://RomainBlanchard:admin@localhost:5984/coachdb'
 
+
 const storage = ref<any>(null)
+
+const remote = ref<any>(null)
+
 const characters = ref<{ data: Character; docId: string; docRev: string }[]>([])
 const isOnline = ref(true)
 let syncHandler: any = null
@@ -75,11 +79,9 @@ const searchMessageText = ref('')
 const sortByLikes = ref(false)
 const searchAffiliation = ref('')
 
-
 const orderByLikesForChar = ref<Record<string, boolean>>({})
 
 const iso = () => new Date().toISOString()
-
 
 const saveWithConflictRetry = async <T extends { _id: string; _rev?: string }>(
   getLatestDoc: () => Promise<T>,
@@ -136,10 +138,15 @@ const removeWithRetry = async (id: string, maxRetries = 3) => {
 }
 
 
-
 const initDatabase = async () => {
+ 
   const localDB = new PouchDB('infradon-blaro')
   storage.value = localDB
+
+
+  remote.value = new PouchDB(COUCH_REMOTE)
+  console.log('initDatabase: local= infradon-blaro, remote=', COUCH_REMOTE)
+
   await createIndexes()
   await fetchData()
   startSync()
@@ -164,14 +171,33 @@ const createIndexes = async () => {
 }
 
 const startSync = () => {
-  if (!storage.value || syncHandler) return
+  if (!storage.value || !remote.value || syncHandler) {
+    console.log('startSync: pas démarré (storage=', !!storage.value, 'remote=', !!remote.value, 'syncHandler=', !!syncHandler, ')')
+    return
+  }
+  console.log('startSync: démarrage sync bidirectionnelle avec', COUCH_REMOTE)
   syncHandler = storage.value
-    .sync(COUCH_REMOTE, { live: true, retry: true })
-    .on('change', async () => { await fetchData(sortByLikes.value) })
+    .sync(remote.value, { live: true, retry: true })
+    .on('change', async (info: any) => {
+      console.log('sync change:', info)
+      await fetchData(sortByLikes.value)
+    })
     .on('error', (err: any) => console.error('Erreur sync :', err))
 }
-const stopSync = () => { if (syncHandler?.cancel) { syncHandler.cancel(); syncHandler = null } }
-const toggleOnline = () => { isOnline.value = !isOnline.value; isOnline.value ? startSync() : stopSync() }
+
+const stopSync = () => {
+  if (syncHandler?.cancel) {
+    console.log('stopSync: arrêt de la réplication live')
+    syncHandler.cancel()
+    syncHandler = null
+  }
+}
+
+const toggleOnline = () => {
+  isOnline.value = !isOnline.value
+  console.log('toggleOnline: isOnline =', isOnline.value)
+  isOnline.value ? startSync() : stopSync()
+}
 
 const mapCharacterDoc = (d: CharacterDoc) => ({
   data: { name: d.name, age: d.age, affiliation: d.affiliation, lightsaber: !!d.lightsaber, likes: d.likes ?? 0, messages: [] },
@@ -179,11 +205,11 @@ const mapCharacterDoc = (d: CharacterDoc) => ({
   docRev: d._rev || ''
 })
 
+
 const loadMessagesForCharacter = async (characterId: string, charIndex: number) => {
   if (!storage.value) return
   const orderByLikes = !!orderByLikesForChar.value[characterId]
 
-  
   const selector: any = { type: 'message', characterId }
   const sort = orderByLikes
     ? [{ type: 'asc' }, { characterId: 'asc' }, { likes: 'desc' }]
@@ -227,6 +253,7 @@ const loadMessagesForCharacter = async (characterId: string, charIndex: number) 
     characters.value[charIndex].data.messages = uiMessages
   }
 }
+
 const reloadAllMessages = async () => {
   for (let i = 0; i < characters.value.length; i++) {
     await loadMessagesForCharacter(characters.value[i].docId, i)
@@ -258,7 +285,6 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
           return mapCharacterDoc(d)
         })
 
-     
       const msgIds = messages.map(m => m._id)
       const { docs: cmtDocs } = await storage.value.find({
         selector: { type: 'comment', messageId: { $in: msgIds } },
@@ -271,7 +297,6 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
         return acc
       }, new Map<string, CommentDoc[]>())
 
-      
       for (const m of messages) {
         const idx = charMap.get(m.characterId)
         if (idx === undefined) continue
@@ -287,7 +312,6 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
         characters.value[idx].data.messages = [msgUI, ...(characters.value[idx].data.messages || []).filter(x => x.id !== msgUI.id)]
       }
     } else {
-      
       const { docs } = await storage.value.find({
         selector: { type: 'character' },
         limit: 9999
@@ -301,9 +325,11 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
 }
 
 
-// CRUD
 const addCharacter = async () => {
-  if (!storage.value) return
+  if (!storage.value){
+    console.warn('addCharacter: storage.value est null')
+    return
+  } 
   try {
     const doc: CharacterDoc = {
       _id: 'character:' + iso(),
@@ -315,11 +341,27 @@ const addCharacter = async () => {
       lightsaber: newCharacter.value.lightsaber,
       likes: newCharacter.value.likes || 0
     }
+
+    
     const res = await storage.value.put(doc)
+    console.log('addCharacter: écrit en local', doc._id, 'rev=', res.rev)
+
+    
+    if (remote.value) {
+      try {
+        const info = await storage.value.replicate.to(remote.value)
+        console.log('addCharacter: réplication vers CouchDB OK', info)
+      } catch (repErr) {
+        console.error('addCharacter: erreur réplication vers CouchDB', repErr)
+      }
+    } else {
+      console.warn('addCharacter: remote DB non initialisée, pas de réplication immédiate')
+    }
+
     characters.value.push(mapCharacterDoc({ ...doc, _rev: res.rev }))
     newCharacter.value = { name: '', age: 0, affiliation: '', lightsaber: false, likes: 0, messages: [] }
   } catch (err) {
-    console.error("Erreur ajout personnage :", err)
+    console.error('Erreur ajout personnage :', err)
   }
 }
 
@@ -339,7 +381,6 @@ const saveEdit = async (index: number) => {
         latest.affiliationLower = (editingCharacter.value!.affiliation || '').toLowerCase()
         latest.lightsaber = editingCharacter.value!.lightsaber
         if (typeof editingCharacter.value!.likes === 'number') {
-          
           latest.likes = Math.max(latest.likes ?? 0, editingCharacter.value!.likes ?? 0)
         }
         return latest
@@ -348,6 +389,7 @@ const saveEdit = async (index: number) => {
     if (updated) {
       characters.value[index] = mapCharacterDoc(updated)
       await loadMessagesForCharacter(curr.docId, index)
+      
     }
     cancelEdit()
   } catch (err) {
@@ -372,10 +414,21 @@ const deleteCharacter = async (index: number) => {
     }
     await removeWithRetry(characterId)
     characters.value.splice(index, 1)
+
+   
+    if (remote.value) {
+      try {
+        const info = await storage.value.replicate.to(remote.value)
+        console.log('deleteCharacter: réplication suppressions vers CouchDB OK', info)
+      } catch (err) {
+        console.error('deleteCharacter: erreur réplication suppressions vers CouchDB', err)
+      }
+    }
   } catch (err) {
     console.error('Erreur suppression personnage :', err)
   }
 }
+
 
 const addMessage = async (charIndex: number) => {
   if (!storage.value) return
@@ -394,6 +447,17 @@ const addMessage = async (charIndex: number) => {
     }
     await storage.value.put(msg)
     await loadMessagesForCharacter(char.docId, charIndex)
+
+   
+    if (remote.value) {
+      try {
+        const info = await storage.value.replicate.to(remote.value)
+        console.log('addMessage: réplication vers CouchDB OK', info)
+      } catch (err) {
+        console.error('addMessage: erreur réplication vers CouchDB', err)
+      }
+    }
+
     newMessageText.value[charIndex] = ''
   } catch (err) {
     console.error('Erreur ajout message :', err)
@@ -421,6 +485,7 @@ const saveEditMessage = async () => {
     )
     if (updated) {
       await loadMessagesForCharacter(characters.value[charIndex].docId, charIndex)
+      
     }
     cancelEditMessage()
   } catch (err) {
@@ -439,10 +504,20 @@ const deleteMessage = async (charIndex: number, msgIndex: number) => {
     if (cmts.length) await storage.value.bulkDocs(cmts.map(c => ({ ...c, _deleted: true })))
     await removeWithRetry(msg.id)
     await loadMessagesForCharacter(char.docId, charIndex)
+
+    if (remote.value) {
+      try {
+        const info = await storage.value.replicate.to(remote.value)
+        console.log('deleteMessage: réplication suppressions vers CouchDB OK', info)
+      } catch (err) {
+        console.error('deleteMessage: erreur réplication suppressions vers CouchDB', err)
+      }
+    }
   } catch (err) {
     console.error('Erreur suppression message :', err)
   }
 }
+
 
 const likeCharacter = async (charIndex: number) => {
   if (!storage.value) return
@@ -459,12 +534,20 @@ const likeCharacter = async (charIndex: number) => {
       characters.value[charIndex] = mapCharacterDoc(updated)
       if (sortByLikes.value) setTimeout(() => fetchData(true), 120)
       else await loadMessagesForCharacter(curr.docId, charIndex)
+
+      if (remote.value) {
+        try {
+          const info = await storage.value.replicate.to(remote.value)
+          console.log('likeCharacter: réplication vers CouchDB OK', info)
+        } catch (err) {
+          console.error('likeCharacter: erreur réplication vers CouchDB', err)
+        }
+      }
     }
   } catch (err) {
     console.error('Erreur like personnage :', err)
   }
 }
-
 
 const likeMessage = async (charIndex: number, msgIndex: number) => {
   if (!storage.value) return
@@ -483,11 +566,21 @@ const likeMessage = async (charIndex: number, msgIndex: number) => {
       } else {
         await loadMessagesForCharacter(characters.value[charIndex].docId, charIndex)
       }
+
+      if (remote.value) {
+        try {
+          const info = await storage.value.replicate.to(remote.value)
+          console.log('likeMessage: réplication vers CouchDB OK', info)
+        } catch (err) {
+          console.error('likeMessage: erreur réplication vers CouchDB', err)
+        }
+      }
     }
   } catch (err) {
     console.error('Erreur like message :', err)
   }
 }
+
 
 const addComment = async (charIndex: number, msgIndex: number) => {
   if (!storage.value) return
@@ -508,6 +601,15 @@ const addComment = async (charIndex: number, msgIndex: number) => {
     await loadMessagesForCharacter(char.docId, charIndex)
     newCommentText.value[key] = ''
     visibleComments.value[key] = true
+
+    if (remote.value) {
+      try {
+        const info = await storage.value.replicate.to(remote.value)
+        console.log('addComment: réplication vers CouchDB OK', info)
+      } catch (err) {
+        console.error('addComment: erreur réplication vers CouchDB', err)
+      }
+    }
   } catch (err) {
     console.error('Erreur ajout commentaire :', err)
   }
@@ -534,6 +636,15 @@ const saveEditComment = async () => {
     )
     if (updated) {
       await loadMessagesForCharacter(char.docId, charIndex)
+
+      if (remote.value) {
+        try {
+          const info = await storage.value.replicate.to(remote.value)
+          console.log('saveEditComment: réplication vers CouchDB OK', info)
+        } catch (err) {
+          console.error('saveEditComment: erreur réplication vers CouchDB', err)
+        }
+      }
     }
     cancelEditComment()
   } catch (err) {
@@ -549,6 +660,15 @@ const deleteComment = async (charIndex: number, msgIndex: number, commentIndex: 
     const cmt = char.data.messages![msgIndex].comments[commentIndex]
     await removeWithRetry(cmt.id)
     await loadMessagesForCharacter(char.docId, charIndex)
+
+    if (remote.value) {
+      try {
+        const info = await storage.value.replicate.to(remote.value)
+        console.log('deleteComment: réplication suppressions vers CouchDB OK', info)
+      } catch (err) {
+        console.error('deleteComment: erreur réplication suppressions vers CouchDB', err)
+      }
+    }
   } catch (err) {
     console.error('Erreur suppression commentaire :', err)
   }
@@ -566,13 +686,13 @@ const toggleCharSort = async (charIndex: number) => {
   await loadMessagesForCharacter(id, charIndex)
 }
 
+
 const searchMessages = async () => {
   if (!storage.value) return
   const q = (searchMessageText.value || '').trim().toLowerCase()
   if (!q) { sortByLikes.value = false; await fetchData(); return }
   try {
     const upper = q + '\uffff'
-    
     const { docs: msgDocs } = await storage.value.find({
       selector: { type: 'message', textLower: { $gte: q, $lte: upper }, createdAt: { $gte: null } },
       sort: [{ type: 'asc' }, { textLower: 'asc' }, { createdAt: 'desc' }],
@@ -619,7 +739,6 @@ const searchMessages = async () => {
       }
       const arr = characters.value[idx].data.messages || []
       arr.push(msgUI)
-      
       characters.value[idx].data.messages = arr
     }
   } catch (err) {
@@ -847,7 +966,6 @@ onMounted(() => { initDatabase() })
 </template>
 
 <style scoped>
-/*css plus propre*/
 :host,
 :root {
   display: block;
@@ -858,7 +976,6 @@ h1 {
   margin-bottom: 2rem;
   letter-spacing: -0.03em;
 }
-
 
 form,
 .p-4.mb-6.border.rounded.bg-gray-50 {
@@ -871,7 +988,6 @@ form h2,
   margin-bottom: 1rem;
 }
 
-
 form input,
 form label,
 .p-4.mb-6.border.rounded.bg-gray-50 input,
@@ -879,7 +995,6 @@ form label,
   margin-top: 0.5rem;
 }
 
-/*perso*/
 section {
   display: flex;
   flex-direction: column;
@@ -900,18 +1015,15 @@ article:hover {
   box-shadow: 0 20px 42px rgba(0, 0, 0, 0.08);
 }
 
-
 article h2 {
   margin-bottom: 0.5rem;
   font-size: 1.05rem;
 }
 
-
 article p {
   margin-top: 0.25rem;
   font-size: 0.85rem;
 }
-
 
 button {
   margin-top: 0.4rem;
@@ -920,22 +1032,18 @@ button {
   border-radius: 6px;
 }
 
-
 article .space-x-2 > * {
   margin-right: 0.4rem;
 }
-
 
 article .border-l-2 {
   margin-top: 1.5rem;
   padding-left: 1.25rem;
 }
 
-
 article .flex.items-center.space-x-2.mt-2 {
   margin-top: 1rem;
 }
-
 
 article .bg-white {
   margin-top: 1.25rem;
@@ -943,12 +1051,10 @@ article .bg-white {
   border-radius: 12px;
 }
 
-
 article .border-l {
   margin-top: 1rem;
   padding-left: 1rem;
 }
-
 
 .bg-gray-50 {
   margin-top: 0.6rem;
@@ -961,7 +1067,6 @@ article .border-l {
   display: inline-block;
 }
 
-
 .p-4.mb-6.border.rounded.bg-gray-50 {
   margin-top: 2rem;
 }
@@ -971,4 +1076,3 @@ button.bg-gray-600 {
   margin-bottom: 2rem;
 }
 </style>
-
