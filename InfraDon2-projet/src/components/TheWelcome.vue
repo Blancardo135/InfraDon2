@@ -38,6 +38,7 @@ interface CharacterDoc {
   affiliationLower?: string
   lightsaber: boolean
   likes: number
+  mediaContentType?: string     // ← ajout pour le média du personnage
 }
 
 interface MessageDoc {
@@ -61,11 +62,17 @@ interface CommentDoc {
   createdAt: string
 }
 
-const COUCH_REMOTE = 'http://RomainBlanchard:admin@localhost:5984/coachdb'
+const COUCH_REMOTE_CHARACTERS = 'http://RomainBlanchard:admin@localhost:5984/coachdb-characters'
+const COUCH_REMOTE_MESSAGES   = 'http://RomainBlanchard:admin@localhost:5984/coachdb-messages'
 
+// Deux "collections" physiques :
+// - storageCharacters / remoteCharacters : characters + comments
+// - storageMessages   / remoteMessages   : messages (+ attachments)
 const storageCharacters = ref<PouchDB.Database | null>(null)
 const storageMessages   = ref<PouchDB.Database | null>(null)
-const remote            = ref<PouchDB.Database | null>(null)
+
+const remoteCharacters = ref<PouchDB.Database | null>(null)
+const remoteMessages   = ref<PouchDB.Database | null>(null)
 
 const characters = ref<{ data: Character; docId: string; docRev: string }[]>([])
 const isOnline = ref(true)
@@ -101,15 +108,16 @@ const orderByLikesForChar = ref<Record<string, boolean>>({})
 const topMessagesPage = ref(0)
 const TOP_PAGE_SIZE = 10
 
+// Médias pour messages
 const messageMediaFile = ref<Record<string, File | null>>({})
 const messageMediaUrl = ref<Record<string, string | null>>({})
 
+// Médias pour personnages (NOUVEAU)
+const characterMediaFile = ref<Record<string, File | null>>({})
+const characterMediaUrl  = ref<Record<string, string | null>>({})
+
 const iso = () => new Date().toISOString()
 
-// Question "Quelles méthodes PouchDB sont utiles ?" :
-// - db.get : pour récupérer la dernière révision du doc
-// - db.put : pour appliquer les modifications
-// - Gestion des conflits côté client via une fonction de merge (mergeFn).
 // -----------------------------------------------------------------------------
 
 const saveWithConflictRetry = async <
@@ -183,42 +191,30 @@ const removeWithRetry = async (
 }
 
 const initDatabase = async () => {
-  // deux bd locales pour simuler 2 collections
+  // Base characters + comments
   const localChars = new PouchDB('infradon-blaro-characters')
-  const localMsgs  = new PouchDB('infradon-blaro-messages')
-
   storageCharacters.value = localChars
-  storageMessages.value   = localMsgs
+  remoteCharacters.value = new PouchDB(COUCH_REMOTE_CHARACTERS)
 
-  
-  remote.value = new PouchDB(COUCH_REMOTE)
+  // Base messages
+  const localMsgs = new PouchDB('infradon-blaro-messages')
+  storageMessages.value = localMsgs
+  remoteMessages.value = new PouchDB(COUCH_REMOTE_MESSAGES)
 
   console.log(
-    'initDatabase: localChars=infradon-blaro-characters, localMsgs=infradon-blaro-messages, remote=',
-    COUCH_REMOTE
+    'initDatabase:',
+    'localChars=infradon-blaro-characters, remoteChars=',
+    COUCH_REMOTE_CHARACTERS,
+    'localMsgs=infradon-blaro-messages, remoteMsgs=',
+    COUCH_REMOTE_MESSAGES
   )
 
   await createIndexesCharacters()
   await createIndexesMessages()
-  await initialReplicateFromRemote()
   await fetchData()
   startSync()
 }
 
-/**
- * 
- * Question : "Est-ce que allDocs({ include_docs: true }) fait sens ?" 
- * - Dans cette appli, non :
- *
- * allDocs(include_docs) chargerait potentiellement toute la base, y compris
- * des documents qui ne sont pas nécessaires pour l’écran courant.
- *
- * je devrais ensuite filtrer/ trier en TypeScript, ce qui va à l’encontre
- * de la consigne : "Les traitements de recherches et de tries ne doivent
- * pas être exécuté en TS."
- */
-
-// Index pour la base characters + comments (+ messages dupliqués)
 const createIndexesCharacters = async () => {
   const db = storageCharacters.value
   if (!db) return
@@ -232,7 +228,6 @@ const createIndexesCharacters = async () => {
   }
 }
 
-// Index pour la base messages
 const createIndexesMessages = async () => {
   const db = storageMessages.value
   if (!db) return
@@ -250,74 +245,31 @@ const createIndexesMessages = async () => {
   }
 }
 
-/**
- * Réplication initiale depuis la base CouchDB existante `coachdb` :
- * - on récupère tous les docs dans la base locale characters (characters, messages, comments)
- * - on copie ensuite les docs de type 'message' dans la base locale messages.
- * 
- * Cela permet de garder toutes les données déjà créées dans coachdb.
- */
-const initialReplicateFromRemote = async () => {
-  const dbChars = storageCharacters.value
-  const dbMsgs  = storageMessages.value
-  const r       = remote.value
-  if (!dbChars || !dbMsgs || !r) return
-
-  try {
-    await dbChars.replicate.from(r)
-    console.log('initialReplicateFromRemote: chars/comments/messages importés dans localChars')
-
-    const { docs: msgDocs } = await dbChars.find({
-      selector: { type: 'message' },
-      limit: 999999
-    })
-
-    if (msgDocs.length) {
-      await dbMsgs.bulkDocs(msgDocs as any)
-      console.log('initialReplicateFromRemote: messages copiés dans localMsgs')
-    }
-  } catch (err) {
-    console.error('Erreur initialReplicateFromRemote :', err)
-  }
-}
-
-/**
- * "Faut-il tout répliquer ?"
- * - Je dis Oui:
- *
- * volume de données limité
- *
- * mode offline complet (toute l’application fonctionne sans réseau)
- *
- * cohérence simple : la base locale = miroir fonctionnel de la base distante
- */
-
 const startSync = () => {
   const dbChars = storageCharacters.value
   const dbMsgs  = storageMessages.value
-  const r       = remote.value
+  const rChars  = remoteCharacters.value
+  const rMsgs   = remoteMessages.value
 
-  if (!dbChars || !dbMsgs || !r || (syncChars && syncMsgs)) {
+  if (!dbChars || !dbMsgs || !rChars || !rMsgs) {
     console.log(
       'startSync: pas démarré (dbChars=',
       !!dbChars,
       'dbMsgs=',
       !!dbMsgs,
-      'remote=',
-      !!r,
-      'syncChars=',
-      !!syncChars,
-      'syncMsgs=',
-      !!syncMsgs,
+      'rChars=',
+      !!rChars,
+      'rMsgs=',
+      !!rMsgs,
       ')'
     )
     return
   }
 
   if (!syncChars) {
-    console.log('startSync: démarrage sync bidirectionnelle localChars <->', COUCH_REMOTE)
+    console.log('startSync: démarrage sync bidirectionnelle characters/comments avec', COUCH_REMOTE_CHARACTERS)
     syncChars = dbChars
-      .sync(r, { live: true, retry: true })
+      .sync(rChars, { live: true, retry: true })
       .on('change', async (info: any) => {
         console.log('sync chars change:', info)
         await fetchData(sortByLikes.value)
@@ -326,9 +278,9 @@ const startSync = () => {
   }
 
   if (!syncMsgs) {
-    console.log('startSync: démarrage sync bidirectionnelle localMsgs <->', COUCH_REMOTE)
+    console.log('startSync: démarrage sync bidirectionnelle messages avec', COUCH_REMOTE_MESSAGES)
     syncMsgs = dbMsgs
-      .sync(r, { live: true, retry: true })
+      .sync(rMsgs, { live: true, retry: true })
       .on('change', async (info: any) => {
         console.log('sync msgs change:', info)
         await fetchData(sortByLikes.value)
@@ -339,12 +291,12 @@ const startSync = () => {
 
 const stopSync = () => {
   if (syncChars?.cancel) {
-    console.log('stopSync: arrêt de la réplication live localChars')
+    console.log('stopSync: arrêt de la réplication live characters/comments')
     syncChars.cancel()
     syncChars = null
   }
   if (syncMsgs?.cancel) {
-    console.log('stopSync: arrêt de la réplication live localMsgs')
+    console.log('stopSync: arrêt de la réplication live messages')
     syncMsgs.cancel()
     syncMsgs = null
   }
@@ -369,18 +321,7 @@ const mapCharacterDoc = (d: CharacterDoc) => ({
   docRev: d._rev || ''
 })
 
-/**
- * Efficacité & réponses aux questions :
- * - je fais pas de allDocs({ attachments: true, include_docs: true }) qui renverrait
- * tous les blobs de la base (inefficace en mémoire + réseau).
- * - appel de db.getAttachment(messageId, 'media') uniquement pour les messages
- * effectivement affichés. Cela réduit les échanges au strict minimum nécessaire.
- *
- * Méthodes utilisées ici
- * - db.getAttachment : pour récupérer le Blob correspondant à l’attachment
- * - URL.createObjectURL (API Web) : pour générer une URL utilisable dans <img> etc.
- * - URL.revokeObjectURL : pour libérer la ressource quand elle n’est plus utile.
- */
+// ----------- MÉDIAS : MESSAGES ----------------------------------------------
 
 const loadMessageMediaUrl = async (messageId: string) => {
   const dbMsgs = storageMessages.value
@@ -401,6 +342,29 @@ const loadMessageMediaUrl = async (messageId: string) => {
   }
 }
 
+// ----------- MÉDIAS : PERSONNAGES (NOUVEAU) ---------------------------------
+
+const loadCharacterMediaUrl = async (characterId: string) => {
+  const dbChars = storageCharacters.value
+  if (!dbChars) return
+
+  try {
+    const blob = await dbChars.getAttachment(characterId, 'media')
+    if (blob) {
+      if (characterMediaUrl.value[characterId]) {
+        URL.revokeObjectURL(characterMediaUrl.value[characterId] as string)
+      }
+      characterMediaUrl.value[characterId] = URL.createObjectURL(blob)
+    }
+  } catch (err: any) {
+    if (err?.status !== 404) {
+      console.error('Erreur getAttachment pour personnage', characterId, err)
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+
 const loadMessagesForCharacter = async (characterId: string, charIndex: number) => {
   const dbMsgs  = storageMessages.value
   const dbChars = storageCharacters.value
@@ -416,10 +380,6 @@ const loadMessagesForCharacter = async (characterId: string, charIndex: number) 
   if (orderByLikes) selector.likes = { $gte: 0 }
   else selector.createdAt = { $gte: null }
 
-  // Ici, j'utilise db.find plutôt que allDocs :
-  // - db.find permet de sélectionner uniquement les messages d’un personnage,
-  // avec un tri côté DB.
-  // - Cela évite de charger tous les messages de tous les perso
   const { docs: messageDocs } = await dbMsgs.find({
     selector,
     sort,
@@ -470,14 +430,6 @@ const reloadAllMessages = async () => {
   }
 }
 
-/**
- * 
- * Question : "Est-ce que allDocs(include_docs) fait sens ici ?"
- * - Non, car allDocs chargerait potentiellement des centaines de messages pour
- * ensuite ne garder que 10 en mémoire. On préfère laisser la DB ne renvoyer
- * que les 10 nécessaires via limit/skip.
- */
-
 const fetchData = async (onlyTopMessagesByLikes = false) => {
   const dbChars = storageCharacters.value
   const dbMsgs  = storageMessages.value
@@ -512,6 +464,11 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
         charMap.set(d._id, idx)
         return mapCharacterDoc(d)
       })
+
+      // Charger média pour les personnages trouvés
+      for (const c of characters.value) {
+        await loadCharacterMediaUrl(c.docId)
+      }
 
       const msgIds = messages.map(m => m._id)
 
@@ -553,6 +510,12 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
         limit: 9999
       })
       characters.value = (docs as CharacterDoc[]).map(mapCharacterDoc)
+
+      // Charger les médias pour tous les personnages
+      for (const c of characters.value) {
+        await loadCharacterMediaUrl(c.docId)
+      }
+
       await reloadAllMessages()
     }
   } catch (err) {
@@ -582,12 +545,9 @@ const addCharacter = async () => {
     const res = await dbChars.put(doc)
     console.log('addCharacter: écrit en local', doc._id, 'rev=', res.rev)
 
-    if (remote.value) {
-      // Question pour l'utilité des méthodes pouchDB
-      // - db.replicate.to(remote) : ici, permet de pousser explicitement les nouvelles
-      // données vers le serveur en plus du sync live, pour un retour plus rapide.
+    if (remoteCharacters.value) {
       try {
-        const info = await dbChars.replicate.to(remote.value)
+        const info = await dbChars.replicate.to(remoteCharacters.value)
         console.log('addCharacter: réplication vers CouchDB OK', info)
       } catch (repErr) {
         console.error('addCharacter: erreur réplication vers CouchDB', repErr)
@@ -648,6 +608,7 @@ const saveEdit = async (index: number) => {
     if (updated) {
       characters.value[index] = mapCharacterDoc(updated)
       await loadMessagesForCharacter(curr.docId, index)
+      await loadCharacterMediaUrl(curr.docId)
     }
 
     cancelEdit()
@@ -667,7 +628,7 @@ const deleteCharacter = async (index: number) => {
     const curr = characters.value[index]
     const characterId = curr.docId
 
-    
+    // Supprimer messages dans la base messages
     const { docs: msgDocs } = await dbMsgs.find({
       selector: { type: 'message', characterId },
       limit: 9999
@@ -678,7 +639,7 @@ const deleteCharacter = async (index: number) => {
     if (msgs.length) {
       const msgIds = msgs.map(m => m._id)
 
-      
+      // Supprimer commentaires liés (dans base characters)
       const { docs: cmtDocs } = await dbChars.find({
         selector: { type: 'comment', messageId: { $in: msgIds } },
         limit: 9999
@@ -692,22 +653,30 @@ const deleteCharacter = async (index: number) => {
       await dbMsgs.bulkDocs(msgs.map(m => ({ ...m, _deleted: true })))
     }
 
+    // Révoquer l'URL média personnage si présente
+    if (characterMediaUrl.value[characterId]) {
+      URL.revokeObjectURL(characterMediaUrl.value[characterId] as string)
+      characterMediaUrl.value[characterId] = null
+    }
+
     await removeWithRetry(dbChars, characterId)
     characters.value.splice(index, 1)
 
-    if (remote.value) {
+    if (remoteCharacters.value) {
       try {
-        const info = await dbChars.replicate.to(remote.value)
-        console.log('deleteCharacter: réplication suppressions vers CouchDB (chars) OK', info)
+        const info = await dbChars.replicate.to(remoteCharacters.value)
+        console.log('deleteCharacter: réplication suppressions vers CouchDB characters OK', info)
       } catch (err) {
-        console.error('deleteCharacter: erreur réplication suppressions vers CouchDB (chars)', err)
+        console.error('deleteCharacter: erreur réplication suppressions vers CouchDB characters', err)
       }
+    }
 
+    if (remoteMessages.value) {
       try {
-        const info2 = await dbMsgs.replicate.to(remote.value)
-        console.log('deleteCharacter: réplication suppressions vers CouchDB (msgs) OK', info2)
-      } catch (err2) {
-        console.error('deleteCharacter: erreur réplication suppressions vers CouchDB (msgs)', err2)
+        const info = await dbMsgs.replicate.to(remoteMessages.value)
+        console.log('deleteCharacter: réplication suppressions vers CouchDB messages OK', info)
+      } catch (err) {
+        console.error('deleteCharacter: erreur réplication suppressions vers CouchDB messages', err)
       }
     }
   } catch (err) {
@@ -738,12 +707,12 @@ const addMessage = async (charIndex: number) => {
     await dbMsgs.put(msg)
     await loadMessagesForCharacter(char.docId, charIndex)
 
-    if (remote.value) {
+    if (remoteMessages.value) {
       try {
-        const info = await dbMsgs.replicate.to(remote.value)
-        console.log('addMessage: réplication vers CouchDB OK', info)
+        const info = await dbMsgs.replicate.to(remoteMessages.value)
+        console.log('addMessage: réplication vers CouchDB messages OK', info)
       } catch (err) {
-        console.error('addMessage: erreur réplication vers CouchDB', err)
+        console.error('addMessage: erreur réplication vers CouchDB messages', err)
       }
     }
 
@@ -802,7 +771,6 @@ const deleteMessage = async (charIndex: number, msgIndex: number) => {
     const char = characters.value[charIndex]
     const msg  = char.data.messages![msgIndex]
 
-   
     const { docs: cmtDocs } = await dbChars.find({
       selector: { type: 'comment', messageId: msg.id },
       limit: 9999
@@ -813,22 +781,30 @@ const deleteMessage = async (charIndex: number, msgIndex: number) => {
       await dbChars.bulkDocs(cmts.map(c => ({ ...c, _deleted: true })))
     }
 
+    // Révoquer URL média message si présente
+    if (messageMediaUrl.value[msg.id]) {
+      URL.revokeObjectURL(messageMediaUrl.value[msg.id] as string)
+      messageMediaUrl.value[msg.id] = null
+    }
+
     await removeWithRetry(dbMsgs, msg.id)
     await loadMessagesForCharacter(char.docId, charIndex)
 
-    if (remote.value) {
+    if (remoteMessages.value) {
       try {
-        const info = await dbMsgs.replicate.to(remote.value)
-        console.log('deleteMessage: réplication suppressions vers CouchDB (msgs) OK', info)
+        const info = await dbMsgs.replicate.to(remoteMessages.value)
+        console.log('deleteMessage: réplication suppressions vers CouchDB messages OK', info)
       } catch (err) {
-        console.error('deleteMessage: erreur réplication suppressions vers CouchDB (msgs)', err)
+        console.error('deleteMessage: erreur réplication suppressions vers CouchDB messages', err)
       }
+    }
 
+    if (remoteCharacters.value) {
       try {
-        const info2 = await dbChars.replicate.to(remote.value)
-        console.log('deleteMessage: réplication suppressions vers CouchDB (chars/comments) OK', info2)
-      } catch (err2) {
-        console.error('deleteMessage: erreur réplication suppressions vers CouchDB (chars/comments)', err2)
+        const info = await dbChars.replicate.to(remoteCharacters.value)
+        console.log('deleteMessage: réplication suppressions vers CouchDB characters OK', info)
+      } catch (err) {
+        console.error('deleteMessage: erreur réplication suppressions vers CouchDB characters', err)
       }
     }
   } catch (err) {
@@ -859,14 +835,15 @@ const likeCharacter = async (charIndex: number) => {
         setTimeout(() => fetchData(true), 120)
       } else {
         await loadMessagesForCharacter(curr.docId, charIndex)
+        await loadCharacterMediaUrl(curr.docId)
       }
 
-      if (remote.value) {
+      if (remoteCharacters.value) {
         try {
-          const info = await dbChars.replicate.to(remote.value)
-          console.log('likeCharacter: réplication vers CouchDB OK', info)
+          const info = await dbChars.replicate.to(remoteCharacters.value)
+          console.log('likeCharacter: réplication vers CouchDB characters OK', info)
         } catch (err) {
-          console.error('likeCharacter: erreur réplication vers CouchDB', err)
+          console.error('likeCharacter: erreur réplication vers CouchDB characters', err)
         }
       }
     }
@@ -898,12 +875,12 @@ const likeMessage = async (charIndex: number, msgIndex: number) => {
         await loadMessagesForCharacter(characters.value[charIndex].docId, charIndex)
       }
 
-      if (remote.value) {
+      if (remoteMessages.value) {
         try {
-          const info = await dbMsgs.replicate.to(remote.value)
-          console.log('likeMessage: réplication vers CouchDB OK', info)
+          const info = await dbMsgs.replicate.to(remoteMessages.value)
+          console.log('likeMessage: réplication vers CouchDB messages OK', info)
         } catch (err) {
-          console.error('likeMessage: erreur réplication vers CouchDB', err)
+          console.error('likeMessage: erreur réplication vers CouchDB messages', err)
         }
       }
     }
@@ -938,12 +915,12 @@ const addComment = async (charIndex: number, msgIndex: number) => {
     newCommentText.value[key] = ''
     visibleComments.value[key] = true
 
-    if (remote.value) {
+    if (remoteCharacters.value) {
       try {
-        const info = await dbChars.replicate.to(remote.value)
-        console.log('addComment: réplication vers CouchDB OK', info)
+        const info = await dbChars.replicate.to(remoteCharacters.value)
+        console.log('addComment: réplication vers CouchDB characters OK', info)
       } catch (err) {
-        console.error('addComment: erreur réplication vers CouchDB', err)
+        console.error('addComment: erreur réplication vers CouchDB characters', err)
       }
     }
   } catch (err) {
@@ -983,12 +960,12 @@ const saveEditComment = async () => {
     if (updated) {
       await loadMessagesForCharacter(char.docId, charIndex)
 
-      if (remote.value) {
+      if (remoteCharacters.value) {
         try {
-          const info = await dbChars.replicate.to(remote.value)
-          console.log('saveEditComment: réplication vers CouchDB OK', info)
+          const info = await dbChars.replicate.to(remoteCharacters.value)
+          console.log('saveEditComment: réplication vers CouchDB characters OK', info)
         } catch (err) {
-          console.error('saveEditComment: erreur réplication vers CouchDB', err)
+          console.error('saveEditComment: erreur réplication vers CouchDB characters', err)
         }
       }
     }
@@ -1012,12 +989,12 @@ const deleteComment = async (charIndex: number, msgIndex: number, commentIndex: 
     await removeWithRetry(dbChars, cmt.id)
     await loadMessagesForCharacter(char.docId, charIndex)
 
-    if (remote.value) {
+    if (remoteCharacters.value) {
       try {
-        const info = await dbChars.replicate.to(remote.value)
-        console.log('deleteComment: réplication suppressions vers CouchDB OK', info)
+        const info = await dbChars.replicate.to(remoteCharacters.value)
+        console.log('deleteComment: réplication suppressions vers CouchDB characters OK', info)
       } catch (err) {
-        console.error('deleteComment: erreur réplication suppressions vers CouchDB', err)
+        console.error('deleteComment: erreur réplication suppressions vers CouchDB characters', err)
       }
     }
   } catch (err) {
@@ -1084,6 +1061,11 @@ const searchMessages = async () => {
       return mapCharacterDoc(d)
     })
 
+    // Charger les médias personnages pour les résultats de recherche
+    for (const c of characters.value) {
+      await loadCharacterMediaUrl(c.docId)
+    }
+
     const msgIds = messages.map(m => m._id)
 
     const { docs: cmtDocs } = await dbChars.find({
@@ -1142,6 +1124,12 @@ const searchByAffiliation = async () => {
     })
 
     characters.value = (docs as CharacterDoc[]).map(mapCharacterDoc)
+
+    // Charger les médias personnages filtrés
+    for (const c of characters.value) {
+      await loadCharacterMediaUrl(c.docId)
+    }
+
     await reloadAllMessages()
   } catch (err) {
     console.error('Erreur recherche affiliation :', err)
@@ -1176,26 +1164,22 @@ const prevTopMessagesPage = async () => {
   }
 }
 
-/**
- * 
- * Questions utilité et efficacité :
- * - db.putAttachment :
- * permet d'associer un Blob (File du navigateur) au document sans créer
- * un sous-document spécifique.
- * - Je ne duplique pas le Blob dans un autre doc => moins de données.
- */
+// ----------- ATTACHMENTS : MESSAGES -----------------------------------------
 
 const attachMediaToMessage = async (msgId: string) => {
   const dbMsgs = storageMessages.value
   if (!dbMsgs) return
 
   const file = messageMediaFile.value[msgId]
-  if (!file) return
+  if (!file) {
+    alert('Veuillez choisir un fichier avant de l’associer au message.')
+    return
+  }
 
   try {
     const doc = await dbMsgs.get<MessageDoc>(msgId)
 
-    const res = await dbMsgs.putAttachment(
+    await dbMsgs.putAttachment(
       msgId,
       'media',
       doc._rev,
@@ -1205,32 +1189,26 @@ const attachMediaToMessage = async (msgId: string) => {
 
     const updatedDoc = await dbMsgs.get<MessageDoc>(msgId)
     updatedDoc.mediaContentType = file.type || 'application/octet-stream'
-    const res2 = await dbMsgs.put(updatedDoc)
+    await dbMsgs.put(updatedDoc)
 
     await loadMessageMediaUrl(msgId)
+    messageMediaFile.value[msgId] = null
 
-    if (remote.value) {
+    if (remoteMessages.value) {
       try {
-        const info = await dbMsgs.replicate.to(remote.value)
-        console.log('attachMediaToMessage: réplication vers CouchDB OK', info)
+        const info = await dbMsgs.replicate.to(remoteMessages.value)
+        console.log('attachMediaToMessage: réplication vers CouchDB messages OK', info)
       } catch (err) {
-        console.error('attachMediaToMessage: erreur réplication vers CouchDB', err)
+        console.error('attachMediaToMessage: erreur réplication vers CouchDB messages', err)
       }
     }
 
-    console.log('Attachment ajouté pour le message', msgId, res2.rev)
+    console.log('Attachment ajouté pour le message', msgId)
   } catch (err) {
     console.error('Erreur attachMediaToMessage :', err)
   }
 }
 
-/**
- * Supprime l’attachment "media" associé à un message.
- *
- * choix :
- * - j'utilise db.removeAttachment pour ne pas supprimer le document complet.
- * - je libère aussi l’URL locale (URL.revokeObjectURL) pour la mémoire.
- */
 const removeMediaFromMessage = async (msgId: string) => {
   const dbMsgs = storageMessages.value
   if (!dbMsgs) return
@@ -1240,30 +1218,111 @@ const removeMediaFromMessage = async (msgId: string) => {
   try {
     const doc = await dbMsgs.get<MessageDoc>(msgId)
 
-    const res = await dbMsgs.removeAttachment(msgId, 'media', doc._rev)
+    await dbMsgs.removeAttachment(msgId, 'media', doc._rev)
     const refreshed = await dbMsgs.get<MessageDoc>(msgId)
     delete refreshed.mediaContentType
-    const res2 = await dbMsgs.put(refreshed)
+    await dbMsgs.put(refreshed)
 
     if (messageMediaUrl.value[msgId]) {
       URL.revokeObjectURL(messageMediaUrl.value[msgId] as string)
       messageMediaUrl.value[msgId] = null
     }
 
-    if (remote.value) {
+    if (remoteMessages.value) {
       try {
-        const info = await dbMsgs.replicate.to(remote.value)
-        console.log('removeMediaFromMessage: réplication vers CouchDB OK', info)
+        const info = await dbMsgs.replicate.to(remoteMessages.value)
+        console.log('removeMediaFromMessage: réplication vers CouchDB messages OK', info)
       } catch (err) {
-        console.error('removeMediaFromMessage: erreur réplication vers CouchDB', err)
+        console.error('removeMediaFromMessage: erreur réplication vers CouchDB messages', err)
       }
     }
 
-    console.log('Attachment supprimé pour le message', msgId, res2.rev)
+    console.log('Attachment supprimé pour le message', msgId)
   } catch (err) {
     console.error('Erreur removeMediaFromMessage :', err)
   }
 }
+
+// ----------- ATTACHMENTS : PERSONNAGES (NOUVEAU) ----------------------------
+
+const attachMediaToCharacter = async (characterId: string) => {
+  const dbChars = storageCharacters.value
+  if (!dbChars) return
+
+  const file = characterMediaFile.value[characterId]
+  if (!file) {
+    alert('Veuillez choisir un fichier avant de l’associer au personnage.')
+    return
+  }
+
+  try {
+    const doc = await dbChars.get<CharacterDoc>(characterId)
+
+    await dbChars.putAttachment(
+      characterId,
+      'media',
+      doc._rev,
+      file,
+      file.type || 'application/octet-stream'
+    )
+
+    const updatedDoc = await dbChars.get<CharacterDoc>(characterId)
+    updatedDoc.mediaContentType = file.type || 'application/octet-stream'
+    await dbChars.put(updatedDoc)
+
+    await loadCharacterMediaUrl(characterId)
+    characterMediaFile.value[characterId] = null
+
+    if (remoteCharacters.value) {
+      try {
+        const info = await dbChars.replicate.to(remoteCharacters.value)
+        console.log('attachMediaToCharacter: réplication vers CouchDB characters OK', info)
+      } catch (err) {
+        console.error('attachMediaToCharacter: erreur réplication vers CouchDB characters', err)
+      }
+    }
+
+    console.log('Attachment ajouté pour le personnage', characterId)
+  } catch (err) {
+    console.error('Erreur attachMediaToCharacter :', err)
+  }
+}
+
+const removeMediaFromCharacter = async (characterId: string) => {
+  const dbChars = storageCharacters.value
+  if (!dbChars) return
+
+  if (!confirm('Supprimer le média associé à ce personnage ?')) return
+
+  try {
+    const doc = await dbChars.get<CharacterDoc>(characterId)
+
+    await dbChars.removeAttachment(characterId, 'media', doc._rev)
+    const refreshed = await dbChars.get<CharacterDoc>(characterId)
+    delete refreshed.mediaContentType
+    await dbChars.put(refreshed)
+
+    if (characterMediaUrl.value[characterId]) {
+      URL.revokeObjectURL(characterMediaUrl.value[characterId] as string)
+      characterMediaUrl.value[characterId] = null
+    }
+
+    if (remoteCharacters.value) {
+      try {
+        const info = await dbChars.replicate.to(remoteCharacters.value)
+        console.log('removeMediaFromCharacter: réplication vers CouchDB characters OK', info)
+      } catch (err) {
+        console.error('removeMediaFromCharacter: erreur réplication vers CouchDB characters', err)
+      }
+    }
+
+    console.log('Attachment supprimé pour le personnage', characterId)
+  } catch (err) {
+    console.error('Erreur removeMediaFromCharacter :', err)
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 onMounted(() => {
   initDatabase()
@@ -1368,8 +1427,6 @@ onMounted(() => {
       }}
     </button>
 
-    text
-
     <div v-if="sortByLikes" class="mt-2 flex items-center space-x-2">
       <button
         @click="prevTopMessagesPage"
@@ -1396,8 +1453,13 @@ onMounted(() => {
     >
       <div v-if="editingIndex !== index">
         <div class="flex items-center justify-between">
-          <h2 class="font-semibold text-lg">{{ char.data.name }}</h2>
-          <div class="flex items-center space-x-2">
+          <div>
+            <h2 class="font-semibold text-lg">{{ char.data.name }}</h2>
+            <p>Âge : {{ char.data.age }}</p>
+            <p>Affiliation : {{ char.data.affiliation }}</p>
+            <p>Sabre laser : {{ char.data.lightsaber ? 'Oui' : 'Non' }}</p>
+          </div>
+          <div class="flex flex-col items-end space-y-2">
             <button
               @click="likeCharacter(index)"
               class="bg-pink-500 text-white px-3 py-1 rounded hover:bg-pink-600 transition text-sm flex items-center space-x-1"
@@ -1405,13 +1467,50 @@ onMounted(() => {
               <span>❤️</span>
               <span>{{ char.data.likes || 0 }}</span>
             </button>
+
+            <!-- Gestion des médias du personnage -->
+            <div class="mt-2 w-full">
+              <label class="text-xs text-gray-600 block mb-1">
+                Média du personnage (image, audio, etc.)
+              </label>
+              <div class="flex items-center space-x-2">
+                <input
+                  type="file"
+                  class="text-xs"
+                  @change="(e: Event) => {
+                    const input = e.target as HTMLInputElement
+                    if (input.files && input.files[0]) {
+                      characterMediaFile[char.docId] = input.files[0]
+                    }
+                  }"
+                />
+                <button
+                  @click="attachMediaToCharacter(char.docId)"
+                  :disabled="!characterMediaFile[char.docId]"
+                  class="bg-blue-500 text-white px-2 py-1 rounded text-xs disabled:opacity-50"
+                >
+                  Associer média
+                </button>
+                <button
+                  v-if="characterMediaUrl[char.docId]"
+                  @click="removeMediaFromCharacter(char.docId)"
+                  class="bg-red-500 text-white px-2 py-1 rounded text-xs"
+                >
+                  Supprimer média
+                </button>
+              </div>
+
+              <div v-if="characterMediaUrl[char.docId]" class="mt-2">
+                <img
+                  :src="characterMediaUrl[char.docId] as string"
+                  alt="Média du personnage"
+                  class="max-w-xs max-h-48 border rounded"
+                />
+              </div>
+            </div>
+            <!-- Fin gestion médias personnage -->
           </div>
         </div>
-        <p>Âge : {{ char.data.age }}</p>
-        <p>Affiliation : {{ char.data.affiliation }}</p>
-        <p>Sabre laser : {{ char.data.lightsaber ? 'Oui' : 'Non' }}</p>
-
-        text
 
         <div class="mt-3 space-x-2">
           <button
@@ -1510,6 +1609,7 @@ onMounted(() => {
                 </button>
               </div>
 
+              <!-- Gestion des Assets (Médias) pour messages -->
               <div class="mt-2">
                 <label class="text-xs text-gray-600 block mb-1">
                   Média associé (image, audio, etc.)
@@ -1527,7 +1627,8 @@ onMounted(() => {
                   />
                   <button
                     @click="attachMediaToMessage(msg.id)"
-                    class="bg-blue-400 text-white px-2 py-1 rounded text-xs"
+                    :disabled="!messageMediaFile[msg.id]"
+                    class="bg-blue-400 text-white px-2 py-1 rounded text-xs disabled:opacity-50"
                   >
                     Associer
                   </button>
@@ -1548,6 +1649,7 @@ onMounted(() => {
                   />
                 </div>
               </div>
+              <!-- Fin Gestion des Assets messages -->
 
               <div class="mt-2 space-x-2">
                 <button
@@ -1580,6 +1682,7 @@ onMounted(() => {
                     Ajouter
                   </button>
                 </div>
+
                 <div
                   v-for="(comment, commentIndex) in (visibleComments[`${index}-${msgIndex}`]
                     ? msg.comments
