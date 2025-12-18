@@ -38,7 +38,7 @@ interface CharacterDoc {
   affiliationLower?: string
   lightsaber: boolean
   likes: number
-  mediaContentType?: string     // ← ajout pour le média du personnage
+  mediaContentType?: string
 }
 
 interface MessageDoc {
@@ -65,9 +65,7 @@ interface CommentDoc {
 const COUCH_REMOTE_CHARACTERS = 'http://RomainBlanchard:admin@localhost:5984/coachdb-characters'
 const COUCH_REMOTE_MESSAGES   = 'http://RomainBlanchard:admin@localhost:5984/coachdb-messages'
 
-// Deux "collections" physiques :
-// - storageCharacters / remoteCharacters : characters + comments
-// - storageMessages   / remoteMessages   : messages (+ attachments)
+
 const storageCharacters = ref<PouchDB.Database | null>(null)
 const storageMessages   = ref<PouchDB.Database | null>(null)
 
@@ -108,17 +106,16 @@ const orderByLikesForChar = ref<Record<string, boolean>>({})
 const topMessagesPage = ref(0)
 const TOP_PAGE_SIZE = 10
 
-// Médias pour messages
+
 const messageMediaFile = ref<Record<string, File | null>>({})
 const messageMediaUrl = ref<Record<string, string | null>>({})
 
-// Médias pour personnages (NOUVEAU)
 const characterMediaFile = ref<Record<string, File | null>>({})
 const characterMediaUrl  = ref<Record<string, string | null>>({})
 
 const iso = () => new Date().toISOString()
 
-// -----------------------------------------------------------------------------
+
 
 const saveWithConflictRetry = async <
   T extends { _id: string; _rev?: string }
@@ -191,12 +188,12 @@ const removeWithRetry = async (
 }
 
 const initDatabase = async () => {
-  // Base characters + comments
+ 
   const localChars = new PouchDB('infradon-blaro-characters')
   storageCharacters.value = localChars
   remoteCharacters.value = new PouchDB(COUCH_REMOTE_CHARACTERS)
 
-  // Base messages
+  
   const localMsgs = new PouchDB('infradon-blaro-messages')
   storageMessages.value = localMsgs
   remoteMessages.value = new PouchDB(COUCH_REMOTE_MESSAGES)
@@ -321,7 +318,6 @@ const mapCharacterDoc = (d: CharacterDoc) => ({
   docRev: d._rev || ''
 })
 
-// ----------- MÉDIAS : MESSAGES ----------------------------------------------
 
 const loadMessageMediaUrl = async (messageId: string) => {
   const dbMsgs = storageMessages.value
@@ -342,7 +338,7 @@ const loadMessageMediaUrl = async (messageId: string) => {
   }
 }
 
-// ----------- MÉDIAS : PERSONNAGES (NOUVEAU) ---------------------------------
+
 
 const loadCharacterMediaUrl = async (characterId: string) => {
   const dbChars = storageCharacters.value
@@ -363,7 +359,7 @@ const loadCharacterMediaUrl = async (characterId: string) => {
   }
 }
 
-// ---------------------------------------------------------------------------
+
 
 const loadMessagesForCharacter = async (characterId: string, charIndex: number) => {
   const dbMsgs  = storageMessages.value
@@ -465,7 +461,7 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
         return mapCharacterDoc(d)
       })
 
-      // Charger média pour les personnages trouvés
+    
       for (const c of characters.value) {
         await loadCharacterMediaUrl(c.docId)
       }
@@ -511,7 +507,7 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
       })
       characters.value = (docs as CharacterDoc[]).map(mapCharacterDoc)
 
-      // Charger les médias pour tous les personnages
+      
       for (const c of characters.value) {
         await loadCharacterMediaUrl(c.docId)
       }
@@ -628,7 +624,7 @@ const deleteCharacter = async (index: number) => {
     const curr = characters.value[index]
     const characterId = curr.docId
 
-    // Supprimer messages dans la base messages
+    
     const { docs: msgDocs } = await dbMsgs.find({
       selector: { type: 'message', characterId },
       limit: 9999
@@ -639,7 +635,7 @@ const deleteCharacter = async (index: number) => {
     if (msgs.length) {
       const msgIds = msgs.map(m => m._id)
 
-      // Supprimer commentaires liés (dans base characters)
+      
       const { docs: cmtDocs } = await dbChars.find({
         selector: { type: 'comment', messageId: { $in: msgIds } },
         limit: 9999
@@ -653,7 +649,7 @@ const deleteCharacter = async (index: number) => {
       await dbMsgs.bulkDocs(msgs.map(m => ({ ...m, _deleted: true })))
     }
 
-    // Révoquer l'URL média personnage si présente
+    
     if (characterMediaUrl.value[characterId]) {
       URL.revokeObjectURL(characterMediaUrl.value[characterId] as string)
       characterMediaUrl.value[characterId] = null
@@ -781,7 +777,7 @@ const deleteMessage = async (charIndex: number, msgIndex: number) => {
       await dbChars.bulkDocs(cmts.map(c => ({ ...c, _deleted: true })))
     }
 
-    // Révoquer URL média message si présente
+    
     if (messageMediaUrl.value[msg.id]) {
       URL.revokeObjectURL(messageMediaUrl.value[msg.id] as string)
       messageMediaUrl.value[msg.id] = null
@@ -1061,7 +1057,7 @@ const searchMessages = async () => {
       return mapCharacterDoc(d)
     })
 
-    // Charger les médias personnages pour les résultats de recherche
+    
     for (const c of characters.value) {
       await loadCharacterMediaUrl(c.docId)
     }
@@ -1125,7 +1121,7 @@ const searchByAffiliation = async () => {
 
     characters.value = (docs as CharacterDoc[]).map(mapCharacterDoc)
 
-    // Charger les médias personnages filtrés
+    
     for (const c of characters.value) {
       await loadCharacterMediaUrl(c.docId)
     }
@@ -1164,7 +1160,7 @@ const prevTopMessagesPage = async () => {
   }
 }
 
-// ----------- ATTACHMENTS : MESSAGES -----------------------------------------
+
 
 const attachMediaToMessage = async (msgId: string) => {
   const dbMsgs = storageMessages.value
@@ -1243,7 +1239,7 @@ const removeMediaFromMessage = async (msgId: string) => {
   }
 }
 
-// ----------- ATTACHMENTS : PERSONNAGES (NOUVEAU) ----------------------------
+
 
 const attachMediaToCharacter = async (characterId: string) => {
   const dbChars = storageCharacters.value
@@ -1322,7 +1318,7 @@ const removeMediaFromCharacter = async (characterId: string) => {
   }
 }
 
-// ---------------------------------------------------------------------------
+
 
 onMounted(() => {
   initDatabase()
@@ -1330,580 +1326,817 @@ onMounted(() => {
 </script>
 
 <template>
-  <h1 class="text-2xl font-bold mb-4">Liste des personnages</h1>
-
-  <div class="mb-4">
-    <button
-      @click="toggleOnline"
-      class="px-4 py-2 rounded text-white"
-      :class="isOnline ? 'bg-green-600' : 'bg-gray-600'"
-    >
-      {{ isOnline ? 'Mode Online ✔' : 'Mode Offline ✖' }}
-    </button>
-  </div>
-
-  <form
-    @submit.prevent="addCharacter"
-    class="p-4 mb-6 border rounded bg-gray-50 space-y-2"
-  >
-    <h2 class="font-semibold text-lg mb-2">Ajouter un personnage</h2>
-    <input
-      v-model="newCharacter.name"
-      placeholder="Nom"
-      class="border p-2 rounded w-full"
-      required
-    />
-    <input
-      v-model.number="newCharacter.age"
-      placeholder="Âge"
-      type="number"
-      class="border p-2 rounded w-full"
-      required
-    />
-    <input
-      v-model="newCharacter.affiliation"
-      placeholder="Affiliation"
-      class="border p-2 rounded w-full"
-      required
-    />
-    <label class="flex items-center space-x-2">
-      <input type="checkbox" v-model="newCharacter.lightsaber" />
-      <span>Possède un sabre laser</span>
-    </label>
-    <button
-      type="submit"
-      class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition"
-    >
-      Ajouter
-    </button>
-  </form>
-
-  <div class="p-4 mb-6 border rounded bg-gray-50 space-y-2">
-    <h2 class="font-semibold text-lg mb-2">Recherche par affiliation</h2>
-    <div class="flex items-center space-x-2">
-      <input
-        v-model="searchAffiliation"
-        placeholder="Ex: Jedi"
-        class="border p-2 rounded w-full"
-      />
-      <button
-        @click="searchByAffiliation"
-        class="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 transition"
-      >
-        Rechercher
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <h1>⚔️ Personnages</h1>
+      <button @click="toggleOnline" class="status-btn" :class="{ online: isOnline }">
+        {{ isOnline ? '● En ligne' : '○ Hors ligne' }}
       </button>
-    </div>
-  </div>
+    </header>
 
-  <div class="p-4 mb-6 border rounded bg-gray-50 space-y-2">
-    <h2 class="font-semibold text-lg mb-2">Recherche et Filtres</h2>
-    <div class="flex items-center space-x-2">
-      <input
-        v-model="searchMessageText"
-        placeholder="Rechercher un message..."
-        class="border p-2 rounded w-full"
-      />
-      <button
-        @click="searchMessages"
-        class="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 transition"
-      >
-        Rechercher
-      </button>
-    </div>
-
-    <button
-      @click="toggleSortByLikes"
-      class="mt-2 px-4 py-2 rounded text-white transition"
-      :class="
-        sortByLikes
-          ? 'bg-yellow-600 ring-2 ring-yellow-400'
-          : 'bg-gray-500 hover:bg-gray-600'
-      "
-    >
-      {{
-        sortByLikes
-          ? 'Top 10 Messages par Likes (Cliquez pour désactiver)'
-          : 'Afficher le Top 10 Messages par Likes'
-      }}
-    </button>
-
-    <div v-if="sortByLikes" class="mt-2 flex items-center space-x-2">
-      <button
-        @click="prevTopMessagesPage"
-        class="px-3 py-1 rounded bg-gray-500 text-white text-xs disabled:opacity-50"
-        :disabled="topMessagesPage === 0"
-      >
-        10 précédents
-      </button>
-      <button
-        @click="nextTopMessagesPage"
-        class="px-3 py-1 rounded bg-gray-700 text-white text-xs"
-      >
-        10 suivants
-      </button>
-      <span class="text-xs text-gray-600">Page {{ topMessagesPage + 1 }}</span>
-    </div>
-  </div>
-
-  <section>
-    <article
-      v-for="(char, index) in characters"
-      :key="char.docId + '-' + index"
-      class="p-4 border-b hover:bg-gray-100 transition"
-    >
-      <div v-if="editingIndex !== index">
-        <div class="flex items-center justify-between">
-          <div>
-            <h2 class="font-semibold text-lg">{{ char.data.name }}</h2>
-            <p>Âge : {{ char.data.age }}</p>
-            <p>Affiliation : {{ char.data.affiliation }}</p>
-            <p>Sabre laser : {{ char.data.lightsaber ? 'Oui' : 'Non' }}</p>
-          </div>
-          <div class="flex flex-col items-end space-y-2">
-            <button
-              @click="likeCharacter(index)"
-              class="bg-pink-500 text-white px-3 py-1 rounded hover:bg-pink-600 transition text-sm flex items-center space-x-1"
-            >
-              <span>❤️</span>
-              <span>{{ char.data.likes || 0 }}</span>
-            </button>
-
-            <!-- Gestion des médias du personnage -->
-            <div class="mt-2 w-full">
-              <label class="text-xs text-gray-600 block mb-1">
-                Média du personnage (image, audio, etc.)
-              </label>
-              <div class="flex items-center space-x-2">
-                <input
-                  type="file"
-                  class="text-xs"
-                  @change="(e: Event) => {
-                    const input = e.target as HTMLInputElement
-                    if (input.files && input.files[0]) {
-                      characterMediaFile[char.docId] = input.files[0]
-                    }
-                  }"
-                />
-                <button
-                  @click="attachMediaToCharacter(char.docId)"
-                  :disabled="!characterMediaFile[char.docId]"
-                  class="bg-blue-500 text-white px-2 py-1 rounded text-xs disabled:opacity-50"
-                >
-                  Associer média
-                </button>
-                <button
-                  v-if="characterMediaUrl[char.docId]"
-                  @click="removeMediaFromCharacter(char.docId)"
-                  class="bg-red-500 text-white px-2 py-1 rounded text-xs"
-                >
-                  Supprimer média
-                </button>
-              </div>
-
-              <div v-if="characterMediaUrl[char.docId]" class="mt-2">
-                <img
-                  :src="characterMediaUrl[char.docId] as string"
-                  alt="Média du personnage"
-                  class="max-w-xs max-h-48 border rounded"
-                />
-              </div>
-            </div>
-            <!-- Fin gestion médias personnage -->
-          </div>
-        </div>
-
-        <div class="mt-3 space-x-2">
-          <button
-            @click="startEdit(index)"
-            class="bg-green-600 text-white px-3 py-1 rounded hover:bg-green-700 transition text-sm"
-          >
-            Modifier
-          </button>
-          <button
-            @click="deleteCharacter(index)"
-            class="bg-red-600 text-white px-3 py-1 rounded hover:bg-red-700 transition text-sm"
-          >
-            Supprimer
-          </button>
-        </div>
-
-        <div class="mt-4 pl-4 border-l-2 border-gray-300">
-          <div class="flex items-center justify-between">
-            <h3 class="font-semibold">Messages</h3>
-            <button
-              @click="toggleCharSort(index)"
-              class="text-xs px-2 py-1 rounded border"
-              :class="
-                orderByLikesForChar[char.docId]
-                  ? 'bg-yellow-50 border-yellow-300 text-yellow-700'
-                  : 'bg-gray-50 border-gray-300 text-gray-700'
-              "
-              :title="
-                orderByLikesForChar[char.docId]
-                  ? 'Trier par Date (desc)'
-                  : 'Trier par Likes (desc)'
-              "
-            >
-              {{ orderByLikesForChar[char.docId] ? 'Tri: Likes ↓' : 'Tri: Date ↓' }}
-            </button>
-          </div>
-
-          <div class="flex items-center space-x-2 mt-2">
-            <input
-              v-model="newMessageText[index]"
-              placeholder="Nouveau message..."
-              class="border p-2 rounded flex-1"
-            />
-            <button
-              @click="addMessage(index)"
-              class="bg-blue-500 text-white px-3 py-1 rounded text-sm"
-            >
-              Ajouter
-            </button>
-          </div>
-
-          <div
-            v-for="(msg, msgIndex) in char.data.messages"
-            :key="msg.id"
-            class="mt-3 p-3 bg-white border rounded"
-          >
-            <div
-              v-if="
-                editingMessageIndex?.charIndex === index &&
-                editingMessageIndex?.msgIndex === msgIndex
-              "
-            >
-              <input
-                v-model="editingMessageText"
-                class="border p-2 rounded w-full"
-              />
-              <div class="mt-2 space-x-2">
-                <button
-                  @click="saveEditMessage"
-                  class="bg-blue-500 text-white px-2 py-1 rounded text-xs"
-                >
-                  Enregistrer
-                </button>
-                <button
-                  @click="cancelEditMessage"
-                  class="bg-gray-500 text-white px-2 py-1 rounded text-xs"
-                >
-                  Annuler
-                </button>
-              </div>
-            </div>
-            <div v-else>
-              <div class="flex items-center justify-between">
-                <div>
-                  <p>{{ msg.text }}</p>
-                  <p class="text-sm text-gray-500">
-                    Posté le {{ new Date(msg.createdAt).toLocaleString() }}
-                  </p>
-                </div>
-                <button
-                  @click="likeMessage(index, msgIndex)"
-                  class="bg-pink-500 text-white px-2 py-1 rounded text-xs flex items-center space-x-1"
-                >
-                  <span>❤️</span>
-                  <span>{{ msg.likes || 0 }}</span>
-                </button>
-              </div>
-
-              <!-- Gestion des Assets (Médias) pour messages -->
-              <div class="mt-2">
-                <label class="text-xs text-gray-600 block mb-1">
-                  Média associé (image, audio, etc.)
-                </label>
-                <div class="flex items-center space-x-2">
-                  <input
-                    type="file"
-                    class="text-xs"
-                    @change="(e: Event) => {
-                      const input = e.target as HTMLInputElement
-                      if (input.files && input.files[0]) {
-                        messageMediaFile[msg.id] = input.files[0]
-                      }
-                    }"
-                  />
-                  <button
-                    @click="attachMediaToMessage(msg.id)"
-                    :disabled="!messageMediaFile[msg.id]"
-                    class="bg-blue-400 text-white px-2 py-1 rounded text-xs disabled:opacity-50"
-                  >
-                    Associer
-                  </button>
-                  <button
-                    v-if="messageMediaUrl[msg.id]"
-                    @click="removeMediaFromMessage(msg.id)"
-                    class="bg-red-400 text-white px-2 py-1 rounded text-xs"
-                  >
-                    Supprimer média
-                  </button>
-                </div>
-
-                <div v-if="messageMediaUrl[msg.id]" class="mt-2">
-                  <img
-                    :src="messageMediaUrl[msg.id] as string"
-                    alt="Média du message"
-                    class="max-w-xs max-h-48 border rounded"
-                  />
-                </div>
-              </div>
-              <!-- Fin Gestion des Assets messages -->
-
-              <div class="mt-2 space-x-2">
-                <button
-                  @click="startEditMessage(index, msgIndex)"
-                  class="bg-green-500 text-white px-2 py-1 rounded text-xs"
-                >
-                  Modifier
-                </button>
-                <button
-                  @click="deleteMessage(index, msgIndex)"
-                  class="bg-red-500 text-white px-2 py-1 rounded text-xs"
-                >
-                  Supprimer
-                </button>
-              </div>
-
-              <div class="mt-3 pl-3 border-l border-gray-200">
-                <p class="text-sm font-semibold">Commentaires</p>
-
-                <div class="flex items-center space-x-2 mt-1">
-                  <input
-                    v-model="newCommentText[`${index}-${msgIndex}`]"
-                    placeholder="Commenter..."
-                    class="border p-1 rounded flex-1 text-sm"
-                  />
-                  <button
-                    @click="addComment(index, msgIndex)"
-                    class="bg-blue-400 text-white px-2 py-1 rounded text-xs"
-                  >
-                    Ajouter
-                  </button>
-                </div>
-
-                <div
-                  v-for="(comment, commentIndex) in (visibleComments[`${index}-${msgIndex}`]
-                    ? msg.comments
-                    : msg.comments.slice(-1))"
-                  :key="comment.id"
-                  class="mt-2 p-2 bg-gray-50 rounded text-sm"
-                >
-                  <div
-                    v-if="
-                      editingCommentIndex?.charIndex === index &&
-                      editingCommentIndex?.msgIndex === msgIndex &&
-                      editingCommentIndex?.commentIndex === commentIndex
-                    "
-                  >
-                    <input
-                      v-model="editingCommentText"
-                      class="border p-1 rounded w-full text-sm"
-                    />
-                    <div class="mt-1 space-x-1">
-                      <button
-                        @click="saveEditComment"
-                        class="bg-blue-400 text-white px-2 py-1 rounded text-xs"
-                      >
-                        Enregistrer
-                      </button>
-                      <button
-                        @click="cancelEditComment"
-                        class="bg-gray-400 text-white px-2 py-1 rounded text-xs"
-                      >
-                        Annuler
-                      </button>
-                    </div>
-                  </div>
-                  <div v-else>
-                    <p>{{ comment.text }}</p>
-                    <div class="mt-1 space-x-1">
-                      <button
-                        @click="startEditComment(index, msgIndex, commentIndex)"
-                        class="bg-green-400 text-white px-2 py-1 rounded text-xs"
-                      >
-                        Modifier
-                      </button>
-                      <button
-                        @click="deleteComment(index, msgIndex, commentIndex)"
-                        class="bg-red-400 text-white px-2 py-1 rounded text-xs"
-                      >
-                        Supprimer
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <div v-if="msg.comments.length > 1" class="mt-2">
-                  <button
-                    @click="toggleCommentVisibility(index, msgIndex)"
-                    class="text-blue-600 text-xs underline hover:text-blue-800"
-                  >
-                    {{
-                      visibleComments[`${index}-${msgIndex}`]
-                        ? 'Masquer les commentaires'
-                        : `Voir les ${msg.comments.length - 1} autres commentaires`
-                    }}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div v-else class="space-y-2">
-        <input
-          v-model="editingCharacter!.name"
-          placeholder="Nom"
-          class="border p-2 rounded w-full"
-          required
-        />
-        <input
-          v-model.number="editingCharacter!.age"
-          placeholder="Âge"
-          type="number"
-          class="border p-2 rounded w-full"
-          required
-        />
-        <input
-          v-model="editingCharacter!.affiliation"
-          placeholder="Affiliation"
-          class="border p-2 rounded w-full"
-          required
-        />
-        <label class="flex items-center space-x-2">
-          <input type="checkbox" v-model="editingCharacter!.lightsaber" />
-          <span>Possède un sabre laser</span>
+    
+    <section class="panel">
+      <h2>Nouveau personnage</h2>
+      <form @submit.prevent="addCharacter" class="form-row">
+        <input v-model="newCharacter.name" placeholder="Nom" required />
+        <input v-model.number="newCharacter.age" placeholder="Âge" type="number" required />
+        <input v-model="newCharacter.affiliation" placeholder="Affiliation" required />
+        <label class="checkbox">
+          <input type="checkbox" v-model="newCharacter.lightsaber" />
+          <span>⚔️ Sabre</span>
         </label>
-        <div class="mt-3 space-x-2">
-          <button
-            @click="saveEdit(index)"
-            class="bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 transition text-sm"
-          >
-            Enregistrer
-          </button>
-          <button
-            @click="cancelEdit"
-            class="bg-gray-600 text-white px-3 py-1 rounded hover:bg-gray-700 transition text-sm"
-          >
-            Annuler
-          </button>
+        <button type="submit" class="btn primary">Ajouter</button>
+      </form>
+    </section>
+
+   
+    <section class="panel">
+      <h2>🔍 Recherche</h2>
+      <div class="filters">
+        <div class="filter-group">
+          <input v-model="searchAffiliation" placeholder="Affiliation..." />
+          <button @click="searchByAffiliation" class="btn">Chercher</button>
+        </div>
+        <div class="filter-group">
+          <input v-model="searchMessageText" placeholder="Message..." />
+          <button @click="searchMessages" class="btn">Chercher</button>
+        </div>
+        <button @click="toggleSortByLikes" class="btn" :class="{ active: sortByLikes }">
+          {{ sortByLikes ? '★ Top 10 ON' : '☆ Top 10' }}
+        </button>
+        <div v-if="sortByLikes" class="pagination">
+          <button @click="prevTopMessagesPage" :disabled="topMessagesPage === 0" class="btn sm">←</button>
+          <span>{{ topMessagesPage + 1 }}</span>
+          <button @click="nextTopMessagesPage" class="btn sm">→</button>
         </div>
       </div>
-    </article>
-  </section>
+    </section>
+
+   
+    <section class="characters-grid">
+      <article v-for="(char, index) in characters" :key="char.docId" class="character-card">
+        
+        
+        <template v-if="editingIndex !== index">
+          
+          <div class="card-header">
+            <div class="avatar">
+              <span>{{ char.data.name.charAt(0) }}</span>
+            </div>
+            <div class="info">
+              <h3>{{ char.data.name }}</h3>
+              <p>
+                {{ char.data.age }} ans • {{ char.data.affiliation }}
+                <span v-if="char.data.lightsaber">⚔️</span>
+              </p>
+            </div>
+            <button @click="likeCharacter(index)" class="like-btn">
+              ❤️ {{ char.data.likes || 0 }}
+            </button>
+          </div>
+
+          
+          <div class="card-actions">
+            <div class="btn-row">
+              <button @click="startEdit(index)" class="btn sm success">✎ Modifier</button>
+              <button @click="deleteCharacter(index)" class="btn sm danger">✕ Supprimer</button>
+            </div>
+          </div>
+
+          
+          <div class="media-section">
+            <div class="media-header">
+              <span>📎 Média associé</span>
+            </div>
+            <div class="media-controls">
+              <input type="file" :id="'cf-' + char.docId" hidden
+                @change="(e: Event) => {
+                  const t = e.target as HTMLInputElement
+                  if (t.files?.[0]) characterMediaFile[char.docId] = t.files[0]
+                }" />
+              <label :for="'cf-' + char.docId" class="btn sm ghost">📷 Choisir</label>
+              <button v-if="characterMediaFile[char.docId]" @click="attachMediaToCharacter(char.docId)" class="btn sm primary">↑ Envoyer</button>
+              <button v-if="characterMediaUrl[char.docId]" @click="removeMediaFromCharacter(char.docId)" class="btn sm danger">🗑 Supprimer</button>
+            </div>
+            <div v-if="characterMediaUrl[char.docId]" class="media-preview">
+              <img :src="characterMediaUrl[char.docId] as string" alt="Média du personnage" />
+            </div>
+          </div>
+
+          <!-- Section Messages -->
+          <div class="messages-section">
+            <div class="section-header">
+              <span>💬 Messages</span>
+              <button @click="toggleCharSort(index)" class="btn xs" :class="{ active: orderByLikesForChar[char.docId] }">
+                {{ orderByLikesForChar[char.docId] ? '♥' : '📅' }}
+              </button>
+            </div>
+
+            <div class="new-message">
+              <input v-model="newMessageText[index]" placeholder="Nouveau message..." />
+              <button @click="addMessage(index)" class="btn sm primary">+</button>
+            </div>
+
+            
+            <div class="messages-list">
+              <div v-for="(msg, msgIndex) in char.data.messages" :key="msg.id" class="message">
+                
+                
+                <template v-if="editingMessageIndex?.charIndex === index && editingMessageIndex?.msgIndex === msgIndex">
+                  <div class="edit-row">
+                    <input v-model="editingMessageText" />
+                    <button @click="saveEditMessage" class="btn xs primary">✓</button>
+                    <button @click="cancelEditMessage" class="btn xs">✕</button>
+                  </div>
+                </template>
+
+                
+                <template v-else>
+                  <div class="message-header">
+                    <p class="text">{{ msg.text }}</p>
+                    <button @click="likeMessage(index, msgIndex)" class="like-btn sm">♥ {{ msg.likes || 0 }}</button>
+                  </div>
+                  <div class="message-meta">
+                    <span>{{ new Date(msg.createdAt).toLocaleDateString() }}</span>
+                    <div class="msg-actions">
+                      <button @click="startEditMessage(index, msgIndex)" class="btn xs ghost">✎</button>
+                      <button @click="deleteMessage(index, msgIndex)" class="btn xs ghost">✕</button>
+                    </div>
+                  </div>
+
+                  
+                  <div class="media-attach">
+                    <div class="media-controls inline">
+                      <input type="file" :id="'mf-' + msg.id" hidden
+                        @change="(e: Event) => {
+                          const t = e.target as HTMLInputElement
+                          if (t.files?.[0]) messageMediaFile[msg.id] = t.files[0]
+                        }" />
+                      <label :for="'mf-' + msg.id" class="btn xs ghost">📎</label>
+                      <button v-if="messageMediaFile[msg.id]" @click="attachMediaToMessage(msg.id)" class="btn xs primary">↑</button>
+                      <button v-if="messageMediaUrl[msg.id]" @click="removeMediaFromMessage(msg.id)" class="btn xs danger">🗑</button>
+                    </div>
+                    <div v-if="messageMediaUrl[msg.id]" class="media-preview sm">
+                      <img :src="messageMediaUrl[msg.id] as string" alt="Média du message" />
+                    </div>
+                  </div>
+
+                  <!-- Commentaires -->
+                  <div class="comments">
+                    <div class="new-comment">
+                      <input v-model="newCommentText[`${index}-${msgIndex}`]" placeholder="Commenter..." />
+                      <button @click="addComment(index, msgIndex)" class="btn xs">→</button>
+                    </div>
+
+                    <div v-for="(comment, cIdx) in (visibleComments[`${index}-${msgIndex}`] ? msg.comments : msg.comments.slice(-1))" 
+                         :key="comment.id" class="comment">
+                      <template v-if="editingCommentIndex?.charIndex === index && editingCommentIndex?.msgIndex === msgIndex && editingCommentIndex?.commentIndex === cIdx">
+                        <input v-model="editingCommentText" />
+                        <button @click="saveEditComment" class="btn xs primary">✓</button>
+                        <button @click="cancelEditComment" class="btn xs">✕</button>
+                      </template>
+                      <template v-else>
+                        <span>{{ comment.text }}</span>
+                        <div class="comment-actions">
+                          <button @click="startEditComment(index, msgIndex, cIdx)" class="btn xs ghost">✎</button>
+                          <button @click="deleteComment(index, msgIndex, cIdx)" class="btn xs ghost">✕</button>
+                        </div>
+                      </template>
+                    </div>
+
+                    <button v-if="msg.comments.length > 1" @click="toggleCommentVisibility(index, msgIndex)" class="link">
+                      {{ visibleComments[`${index}-${msgIndex}`] ? 'Masquer' : `+${msg.comments.length - 1} commentaires` }}
+                    </button>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        
+        <template v-else>
+          <form @submit.prevent="saveEdit(index)" class="edit-form">
+            <input v-model="editingCharacter!.name" placeholder="Nom" required />
+            <input v-model.number="editingCharacter!.age" placeholder="Âge" type="number" required />
+            <input v-model="editingCharacter!.affiliation" placeholder="Affiliation" required />
+            <label class="checkbox">
+              <input type="checkbox" v-model="editingCharacter!.lightsaber" />
+              <span>⚔️ Sabre laser</span>
+            </label>
+            <div class="btn-row">
+              <button type="submit" class="btn primary">Enregistrer</button>
+              <button type="button" @click="cancelEdit" class="btn">Annuler</button>
+            </div>
+          </form>
+        </template>
+      </article>
+    </section>
+  </div>
 </template>
 
 <style scoped>
-:host,
-:root {
-  display: block;
-  padding-top: 2rem;
+
+* {
+  box-sizing: border-box;
 }
 
-h1 {
-  margin-bottom: 2rem;
-  letter-spacing: -0.03em;
-}
-
-form,
-.p-4.mb-6.border.rounded.bg-gray-50 {
-  margin-bottom: 2.5rem;
-  padding: 1.5rem;
-}
-
-form h2,
-.p-4.mb-6.border.rounded.bg-gray-50 h2 {
-  margin-bottom: 1rem;
-}
-
-form input,
-form label,
-.p-4.mb-6.border.rounded.bg-gray-50 input,
-.p-4.mb-6.border.rounded.bg-gray-50 button {
-  margin-top: 0.5rem;
-}
-
-section {
-  display: flex;
-  flex-direction: column;
-  gap: 2.25rem;
-}
-
-article {
-  padding: 1.75rem;
-  background: linear-gradient(180deg, #ffffff, #fafafa);
-  border-radius: 16px;
-  border: 1px solid #e5e7eb;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.06);
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
-}
-
-article:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 20px 42px rgba(0, 0, 0, 0.08);
-}
-
-article h2 {
-  margin-bottom: 0.5rem;
-  font-size: 1.05rem;
-}
-
-article p {
-  margin-top: 0.25rem;
-  font-size: 0.85rem;
-}
-
-button {
-  margin-top: 0.4rem;
-  font-size: 0.72rem;
-  padding: 0.3rem 0.65rem;
-  border-radius: 6px;
-}
-
-article .space-x-2 > * {
-  margin-right: 0.4rem;
-}
-
-article .border-l-2 {
-  margin-top: 1.5rem;
-  padding-left: 1.25rem;
-}
-
-article .flex.items-center.space-x-2.mt-2 {
-  margin-top: 1rem;
-}
-
-article .bg-white {
-  margin-top: 1.25rem;
+.app {
+  --bg: #0d0d0d;
+  --surface: #1a1a1a;
+  --surface-2: #242424;
+  --surface-3: #2e2e2e;
+  --border: #333;
+  --border-light: #444;
+  --text: #eee;
+  --text-dim: #999;
+  --text-muted: #666;
+  --primary: #3b82f6;
+  --primary-dim: #2563eb;
+  --success: #22c55e;
+  --danger: #ef4444;
+  --warning: #f59e0b;
+  --pink: #ec4899;
+  
+  max-width: 800px;
+  margin: 0 auto;
   padding: 1rem;
-  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  min-height: 100vh;
 }
 
-article .border-l {
-  margin-top: 1rem;
-  padding-left: 1rem;
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 0;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
 }
 
-.bg-gray-50 {
-  margin-top: 0.6rem;
-  padding: 0.6rem;
+.header h1 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.status-btn {
+  padding: 0.35rem 0.75rem;
+  border-radius: 1rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.status-btn.online {
+  background: var(--success);
+  color: #fff;
+  border-color: var(--success);
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.4);
+}
+
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.875rem;
+  margin-bottom: 0.875rem;
+}
+
+.panel h2 {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin: 0 0 0.625rem 0;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.form-row input[type="text"],
+.form-row input[type="number"] {
+  flex: 1;
+  min-width: 100px;
+}
+
+
+input[type="text"],
+input[type="number"],
+input:not([type]) {
+  padding: 0.5rem 0.75rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  transition: all 0.15s;
+}
+
+input::placeholder {
+  color: var(--text-muted);
+}
+
+input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.checkbox input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--primary);
+}
+
+
+.btn {
+  padding: 0.5rem 0.875rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.btn:hover {
+  background: var(--surface-3);
+  border-color: var(--border-light);
+}
+
+.btn.sm { padding: 0.35rem 0.625rem; font-size: 10px; }
+.btn.xs { padding: 0.25rem 0.5rem; font-size: 10px; }
+
+.btn.primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+.btn.primary:hover { background: var(--primary-dim); }
+
+.btn.success {
+  background: var(--success);
+  border-color: var(--success);
+  color: #fff;
+}
+
+.btn.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.btn.ghost {
+  background: transparent;
+  border-color: transparent;
+}
+.btn.ghost:hover {
+  background: var(--surface-3);
+}
+
+.btn.active {
+  background: var(--warning);
+  border-color: var(--warning);
+  color: #000;
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-row {
+  display: flex;
+  gap: 0.375rem;
+}
+
+.link {
+  background: none;
+  border: none;
+  color: var(--primary);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0.25rem 0;
+}
+.link:hover { text-decoration: underline; }
+
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.filter-group {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.filter-group input {
+  width: 120px;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+
+.characters-grid {
+  display: grid;
+  gap: 0.75rem;
+}
+
+
+.character-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.875rem;
+  transition: all 0.2s;
+}
+
+.character-card:hover {
+  border-color: var(--border-light);
+}
+
+
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.625rem;
+}
+
+.avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--primary), #8b5cf6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 14px;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.info {
+  flex: 1;
+  min-width: 0;
+}
+
+.info h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.info p {
+  margin: 0.125rem 0 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.like-btn {
+  padding: 0.35rem 0.625rem;
+  border-radius: 1rem;
+  border: none;
+  background: linear-gradient(135deg, var(--pink), #db2777);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform 0.15s;
+}
+
+.like-btn:hover {
+  transform: scale(1.05);
+}
+
+.like-btn.sm {
+  padding: 0.2rem 0.5rem;
+  font-size: 10px;
+}
+
+
+.card-actions {
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.625rem;
+}
+
+
+.media-section {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
   border-radius: 8px;
+  padding: 0.625rem;
+  margin-bottom: 0.75rem;
 }
 
-.text-blue-600 {
-  margin-top: 0.75rem;
+.media-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.media-controls {
+  display: flex;
+  gap: 0.375rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.media-controls.inline {
+  margin-bottom: 0.375rem;
+}
+
+.media-preview {
+  margin-top: 0.5rem;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--surface-3);
   display: inline-block;
 }
 
-.p-4.mb-6.border.rounded.bg-gray-50 {
-  margin-top: 2rem;
+.media-preview img {
+  display: block;
+  max-width: 200px;
+  max-height: 150px;
+  object-fit: contain;
+  border-radius: 6px;
 }
 
-button.bg-green-600,
-button.bg-gray-600 {
-  margin-bottom: 2rem;
+.media-preview.sm img {
+  max-width: 140px;
+  max-height: 100px;
+}
+
+
+.media-attach {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border);
+}
+
+
+.messages-section {
+  margin-top: 0.5rem;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.new-message {
+  display: flex;
+  gap: 0.375rem;
+  margin-bottom: 0.5rem;
+}
+
+.new-message input {
+  flex: 1;
+}
+
+.messages-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+
+.message {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.625rem;
+}
+
+.message-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.message-header .text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  flex: 1;
+}
+
+.message-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 0.375rem;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.msg-actions {
+  display: flex;
+  gap: 0.125rem;
+}
+
+.edit-row {
+  display: flex;
+  gap: 0.375rem;
+  align-items: center;
+}
+
+.edit-row input {
+  flex: 1;
+}
+
+
+.comments {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border);
+}
+
+.new-comment {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.375rem;
+}
+
+.new-comment input {
+  flex: 1;
+  padding: 0.35rem 0.5rem;
+  font-size: 11px;
+}
+
+.comment {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  background: var(--surface-3);
+  border-radius: 4px;
+  margin-bottom: 0.25rem;
+  font-size: 11px;
+}
+
+.comment span {
+  flex: 1;
+  color: var(--text-dim);
+}
+
+.comment input {
+  flex: 1;
+  padding: 0.25rem 0.5rem;
+  font-size: 11px;
+}
+
+.comment-actions {
+  display: flex;
+  gap: 0.125rem;
+}
+
+
+.edit-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+.edit-form .checkbox {
+  grid-column: span 2;
+}
+
+.edit-form .btn-row {
+  grid-column: span 2;
+  justify-content: flex-start;
+}
+
+
+@media (max-width: 600px) {
+  .app {
+    padding: 0.75rem;
+  }
+  
+  .form-row {
+    flex-direction: column;
+  }
+  
+  .form-row input {
+    width: 100%;
+  }
+  
+  .filters {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  
+  .filter-group {
+    width: 100%;
+  }
+  
+  .filter-group input {
+    flex: 1;
+    width: auto;
+  }
+  
+  .card-header {
+    flex-wrap: wrap;
+  }
+  
+  .card-actions {
+    flex-direction: column;
+    gap: 0.5rem;
+    align-items: flex-start;
+  }
+  
+  .edit-form {
+    grid-template-columns: 1fr;
+  }
+  
+  .edit-form .checkbox,
+  .edit-form .btn-row {
+    grid-column: span 1;
+  }
+
+  .media-preview img {
+    max-width: 100%;
+    max-height: 120px;
+  }
+
+  .media-preview.sm img {
+    max-width: 100%;
+    max-height: 80px;
+  }
+}
+
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-light);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
 }
 </style>
