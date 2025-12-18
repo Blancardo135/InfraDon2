@@ -37,6 +37,8 @@ interface MessageDoc {
   textLower: string
   createdAt: string
   likes: number
+  // type MIME du média attaché (si présent)
+  mediaContentType?: string
 }
 
 interface CommentDoc {
@@ -50,9 +52,7 @@ interface CommentDoc {
 
 const COUCH_REMOTE = 'http://RomainBlanchard:admin@localhost:5984/coachdb'
 
-
 const storage = ref<any>(null)
-
 const remote = ref<any>(null)
 
 const characters = ref<{ data: Character; docId: string; docRev: string }[]>([])
@@ -81,8 +81,40 @@ const searchAffiliation = ref('')
 
 const orderByLikesForChar = ref<Record<string, boolean>>({})
 
+// -----------------------------------------------------------------------------
+// AFFICHAGE DES 10 DOCUMENTS LES PLUS "LIKÉS" + PAGINATION
+// -----------------------------------------------------------------------------
+// Exigences :
+//  - Afficher les 10 documents les plus “likés“
+//  - Offrir la possibilité d’afficher les 10 documents suivants sur le même principe
+//
+// Ici, on considère que le "document" à trier par likes est un message (type: 'message').
+// On s’appuie sur PouchDB.find + index Mango (type, likes) pour déléguer tri/pagination
+// à la base (et ne PAS faire les tris en TypeScript).
+//
+// On évite ainsi de charger tous les messages (pas de allDocs+tri en mémoire) pour
+// n’en afficher que 10. On ne récupère que la "page" utile depuis la DB.
+//
+const topMessagesPage = ref(0) // 0 = première page, 1 = page suivante, etc.
+const TOP_PAGE_SIZE = 10
+
+// Fichiers sélectionnés pour chaque message (clé = messageId)
+const messageMediaFile = ref<Record<string, File | null>>({})
+
+// URLs temporaires pour prévisualiser les médias (clé = messageId)
+const messageMediaUrl = ref<Record<string, string | null>>({})
+
 const iso = () => new Date().toISOString()
 
+// -----------------------------------------------------------------------------
+// saveWithConflictRetry
+// -----------------------------------------------------------------------------
+// Utilise db.get + db.put pour gérer les conflits de révision (409).
+// Question "Quelles méthodes PouchDB sont utiles ?" :
+//  - db.get : pour récupérer la dernière révision du doc
+//  - db.put : pour appliquer les modifications
+//  - Gestion des conflits côté client via une fonction de merge (mergeFn).
+// -----------------------------------------------------------------------------
 const saveWithConflictRetry = async <T extends { _id: string; _rev?: string }>(
   getLatestDoc: () => Promise<T>,
   mergeFn: (latest: T) => T,
@@ -137,12 +169,9 @@ const removeWithRetry = async (id: string, maxRetries = 3) => {
   return false
 }
 
-
 const initDatabase = async () => {
- 
   const localDB = new PouchDB('infradon-blaro')
   storage.value = localDB
-
 
   remote.value = new PouchDB(COUCH_REMOTE)
   console.log('initDatabase: local= infradon-blaro, remote=', COUCH_REMOTE)
@@ -152,6 +181,25 @@ const initDatabase = async () => {
   startSync()
 }
 
+/**
+ * Index Mango nécessaires pour déléguer les tris / recherches à PouchDB
+ * plutôt que de trier/filtrer en TS.
+ *
+ * Question : "Est-ce que allDocs({ include_docs: true }) fait sens ?"
+ * - Dans cette appli, NON :
+ *   * allDocs(include_docs) chargerait potentiellement toute la base, y compris
+ *     des documents qui ne sont pas nécessaires pour l’écran courant.
+ *   * On devrait ensuite filtrer/ trier en TypeScript, ce qui va à l’encontre
+ *     de la consigne : "Les traitements de recherches et de tries ne doivent
+ *     pas être exécuté en TS."
+ *
+ * Choix :
+ * - Utiliser db.find({ selector, sort }) + db.createIndex(...) pour :
+ *   * Récupérer uniquement les documents utiles (messages d’un personnage, top 10, etc.)
+ *   * Déléguer les tris/filtrages à PouchDB (et donc, à la base distante lors de la réplication)
+ * - Les index (type, likes, characterId, textLower...) sont conçus pour couvrir
+ *   les cas d’usage du TP : recherche, tri par likes, filtre par affiliation, etc.
+ */
 const createIndexes = async () => {
   if (!storage.value) return
   try {
@@ -159,10 +207,10 @@ const createIndexes = async () => {
     await storage.value.createIndex({ index: { fields: ['type', 'likes'] } })
     await storage.value.createIndex({ index: { fields: ['type', 'affiliationLower'] } })
     await storage.value.createIndex({ index: { fields: ['type', 'characterId'] } })
-    await storage.value.createIndex({ index: { fields: ['type', 'characterId', 'likes'] } }) 
-    await storage.value.createIndex({ index: { fields: ['type', 'characterId', 'createdAt'] } }) 
+    await storage.value.createIndex({ index: { fields: ['type', 'characterId', 'likes'] } })
+    await storage.value.createIndex({ index: { fields: ['type', 'characterId', 'createdAt'] } })
     await storage.value.createIndex({ index: { fields: ['type', 'textLower'] } })
-    await storage.value.createIndex({ index: { fields: ['type', 'textLower', 'createdAt'] } }) 
+    await storage.value.createIndex({ index: { fields: ['type', 'textLower', 'createdAt'] } })
     await storage.value.createIndex({ index: { fields: ['type', 'messageId'] } })
     console.log('Index Mango créés')
   } catch (err) {
@@ -170,12 +218,30 @@ const createIndexes = async () => {
   }
 }
 
+/**
+ * Réplication bidirectionnelle en live entre base locale et CouchDB distante.
+ *
+ * Question : "Faut-il tout répliquer ?"
+ * - Dans ce TP, on a choisi OUI :
+ *   * volume de données limité
+ *   * on souhaite un mode offline complet (toute l’application fonctionne sans réseau)
+ *   * cohérence simple : la base locale = miroir fonctionnel de la base distante
+ *
+ * Remarque :
+ * - Pour une application réelle avec beaucoup de données, on pourrait :
+ *   * faire de la réplication filtrée (seulement les docs d'un utilisateur, etc.)
+ *   * utiliser plusieurs bases (ex: /messages-recents, /messages-archives)
+ *   pour réduire les coûts réseau/stockage.
+ */
 const startSync = () => {
   if (!storage.value || !remote.value || syncHandler) {
     console.log('startSync: pas démarré (storage=', !!storage.value, 'remote=', !!remote.value, 'syncHandler=', !!syncHandler, ')')
     return
   }
   console.log('startSync: démarrage sync bidirectionnelle avec', COUCH_REMOTE)
+  // Méthodes PouchDB utiles ici :
+  // - db.sync(remote, { live: true, retry: true }) pour garder la base locale
+  //   toujours à jour (offline-first) sans faire d’appels manuels en continu.
   syncHandler = storage.value
     .sync(remote.value, { live: true, retry: true })
     .on('change', async (info: any) => {
@@ -205,6 +271,36 @@ const mapCharacterDoc = (d: CharacterDoc) => ({
   docRev: d._rev || ''
 })
 
+/**
+ * Charge (si présent) l’attachment "media" pour un message donné et produit une URL locale (createObjectURL).
+ *
+ * Efficacité & réponses aux questions :
+ * - On NE fait pas de allDocs({ attachments: true, include_docs: true }) qui renverrait
+ *   tous les blobs de la base (inefficace en mémoire + réseau).
+ * - On appelle db.getAttachment(messageId, 'media') uniquement pour les messages
+ *   effectivement affichés. Cela réduit les échanges au strict minimum nécessaire.
+ *
+ * Méthodes utilisées :
+ * - db.getAttachment : pour récupérer le Blob correspondant à l’attachment
+ * - URL.createObjectURL (API Web) : pour générer une URL utilisable dans <img> etc.
+ * - URL.revokeObjectURL : pour libérer la ressource quand elle n’est plus utile.
+ */
+const loadMessageMediaUrl = async (messageId: string) => {
+  if (!storage.value) return
+  try {
+    const blob = await storage.value.getAttachment(messageId, 'media')
+    if (blob) {
+      if (messageMediaUrl.value[messageId]) {
+        URL.revokeObjectURL(messageMediaUrl.value[messageId] as string)
+      }
+      messageMediaUrl.value[messageId] = URL.createObjectURL(blob)
+    }
+  } catch (err: any) {
+    if (err?.status !== 404) {
+      console.error('Erreur getAttachment pour message', messageId, err)
+    }
+  }
+}
 
 const loadMessagesForCharacter = async (characterId: string, charIndex: number) => {
   if (!storage.value) return
@@ -218,6 +314,10 @@ const loadMessagesForCharacter = async (characterId: string, charIndex: number) 
   if (orderByLikes) selector.likes = { $gte: 0 }
   else selector.createdAt = { $gte: null }
 
+  // Ici, on utilise db.find plutôt que allDocs :
+  //  - db.find permet de sélectionner uniquement les messages d’un personnage,
+  //    avec un tri côté DB (par date ou par likes).
+  //  - Cela évite de charger tous les messages de tous les personnages.
   const { docs: messageDocs } = await storage.value.find({
     selector,
     sort,
@@ -252,6 +352,10 @@ const loadMessagesForCharacter = async (characterId: string, charIndex: number) 
   if (characters.value[charIndex]?.docId === characterId) {
     characters.value[charIndex].data.messages = uiMessages
   }
+
+  for (const m of uiMessages) {
+    await loadMessageMediaUrl(m.id)
+  }
 }
 
 const reloadAllMessages = async () => {
@@ -260,15 +364,22 @@ const reloadAllMessages = async () => {
   }
 }
 
+/**
+ *
+ * Question : "Est-ce que allDocs(include_docs) fait sens ici ?"
+ *  - Non, car allDocs chargerait potentiellement des centaines de messages pour
+ *    ensuite ne garder que 10 en mémoire. On préfère laisser la DB ne renvoyer
+ *    que les 10 nécessaires via limit/skip.
+ */
 const fetchData = async (onlyTopMessagesByLikes = false) => {
   if (!storage.value) return
   try {
     if (onlyTopMessagesByLikes) {
-      
       const { docs: msgDocs } = await storage.value.find({
         selector: { type: 'message', likes: { $gte: 0 } },
         sort: [{ type: 'asc' }, { likes: 'desc' }],
-        limit: 10
+        limit: TOP_PAGE_SIZE,
+        skip: topMessagesPage.value * TOP_PAGE_SIZE
       })
       const messages = msgDocs as MessageDoc[]
 
@@ -277,7 +388,6 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
         return
       }
 
-      
       const characterIds = Array.from(new Set(messages.map(m => m.characterId)))
       const { docs: charDocs } = await storage.value.find({
         selector: { _id: { $in: characterIds } },
@@ -292,7 +402,6 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
         return mapCharacterDoc(d)
       })
 
-      
       const msgIds = messages.map(m => m._id)
       const { docs: cmtDocs } = await storage.value.find({
         selector: { type: 'comment', messageId: { $in: msgIds } },
@@ -305,7 +414,6 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
         return acc
       }, new Map<string, CommentDoc[]>())
 
-      
       for (const m of messages) {
         const idx = charMap.get(m.characterId)
         if (idx === undefined) continue
@@ -320,13 +428,13 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
             .map(c => ({ id: c._id, text: c.text, createdAt: c.createdAt }))
         }
 
-        
         const arr = characters.value[idx].data.messages || []
         arr.push(msgUI)
         characters.value[idx].data.messages = arr
+
+        await loadMessageMediaUrl(msgUI.id)
       }
     } else {
-      
       const { docs } = await storage.value.find({
         selector: { type: 'character' },
         limit: 9999
@@ -338,7 +446,6 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
     console.error('Erreur fetch data :', err)
   }
 }
-
 
 const addCharacter = async () => {
   if (!storage.value){
@@ -357,12 +464,13 @@ const addCharacter = async () => {
       likes: newCharacter.value.likes || 0
     }
 
-    
     const res = await storage.value.put(doc)
     console.log('addCharacter: écrit en local', doc._id, 'rev=', res.rev)
 
-    
     if (remote.value) {
+      // Question pour l'utilité des méthodes pouchDB
+      // - db.replicate.to(remote) : ici, permet de pousser explicitement les nouvelles
+      //   données vers le serveur en plus du sync live, pour un retour plus rapide.
       try {
         const info = await storage.value.replicate.to(remote.value)
         console.log('addCharacter: réplication vers CouchDB OK', info)
@@ -404,7 +512,6 @@ const saveEdit = async (index: number) => {
     if (updated) {
       characters.value[index] = mapCharacterDoc(updated)
       await loadMessagesForCharacter(curr.docId, index)
-      
     }
     cancelEdit()
   } catch (err) {
@@ -430,7 +537,6 @@ const deleteCharacter = async (index: number) => {
     await removeWithRetry(characterId)
     characters.value.splice(index, 1)
 
-   
     if (remote.value) {
       try {
         const info = await storage.value.replicate.to(remote.value)
@@ -443,7 +549,6 @@ const deleteCharacter = async (index: number) => {
     console.error('Erreur suppression personnage :', err)
   }
 }
-
 
 const addMessage = async (charIndex: number) => {
   if (!storage.value) return
@@ -463,7 +568,6 @@ const addMessage = async (charIndex: number) => {
     await storage.value.put(msg)
     await loadMessagesForCharacter(char.docId, charIndex)
 
-   
     if (remote.value) {
       try {
         const info = await storage.value.replicate.to(remote.value)
@@ -500,7 +604,6 @@ const saveEditMessage = async () => {
     )
     if (updated) {
       await loadMessagesForCharacter(characters.value[charIndex].docId, charIndex)
-      
     }
     cancelEditMessage()
   } catch (err) {
@@ -532,7 +635,6 @@ const deleteMessage = async (charIndex: number, msgIndex: number) => {
     console.error('Erreur suppression message :', err)
   }
 }
-
 
 const likeCharacter = async (charIndex: number) => {
   if (!storage.value) return
@@ -595,7 +697,6 @@ const likeMessage = async (charIndex: number, msgIndex: number) => {
     console.error('Erreur like message :', err)
   }
 }
-
 
 const addComment = async (charIndex: number, msgIndex: number) => {
   if (!storage.value) return
@@ -701,11 +802,10 @@ const toggleCharSort = async (charIndex: number) => {
   await loadMessagesForCharacter(id, charIndex)
 }
 
-
 const searchMessages = async () => {
   if (!storage.value) return
   const q = (searchMessageText.value || '').trim().toLowerCase()
-  if (!q) { sortByLikes.value = false; await fetchData(); return }
+  if (!q) { sortByLikes.value = false; topMessagesPage.value = 0; await fetchData(); return }
   try {
     const upper = q + '\uffff'
     const { docs: msgDocs } = await storage.value.find({
@@ -755,6 +855,8 @@ const searchMessages = async () => {
       const arr = characters.value[idx].data.messages || []
       arr.push(msgUI)
       characters.value[idx].data.messages = arr
+
+      await loadMessageMediaUrl(msgUI.id)
     }
   } catch (err) {
     console.error('Erreur recherche messages :', err)
@@ -764,7 +866,7 @@ const searchMessages = async () => {
 const searchByAffiliation = async () => {
   if (!storage.value) return
   const val = (searchAffiliation.value || '').trim().toLowerCase()
-  if (!val) { sortByLikes.value = false; await fetchData(); return }
+  if (!val) { sortByLikes.value = false; topMessagesPage.value = 0; await fetchData(); return }
   try {
     const { docs } = await storage.value.find({
       selector: { type: 'character', affiliationLower: val },
@@ -778,8 +880,114 @@ const searchByAffiliation = async () => {
 }
 
 const toggleSortByLikes = async () => {
-  if (sortByLikes.value) { sortByLikes.value = false; await fetchData() }
-  else { sortByLikes.value = true; await fetchData(true) }
+  if (sortByLikes.value) {
+    sortByLikes.value = false
+    topMessagesPage.value = 0
+    await fetchData()
+  } else {
+    sortByLikes.value = true
+    topMessagesPage.value = 0
+    await fetchData(true)
+  }
+}
+
+const nextTopMessagesPage = async () => {
+  if (!storage.value) return
+  topMessagesPage.value++
+  await fetchData(true)
+}
+
+const prevTopMessagesPage = async () => {
+  if (!storage.value) return
+  if (topMessagesPage.value > 0) {
+    topMessagesPage.value--
+    await fetchData(true)
+  }
+}
+
+/**
+ *
+ * Questions utilité et efficacité :
+ * - db.putAttachment :
+ *      permet d'associer un Blob (File du navigateur) au document sans créer
+ *        un sous-document spécifique.
+ * - Je ne duplique pas le Blob dans un autre doc => moins de données.
+ */
+const attachMediaToMessage = async (msgId: string) => {
+  if (!storage.value) return
+  const file = messageMediaFile.value[msgId]
+  if (!file) return
+
+  try {
+    const doc = await storage.value.get<MessageDoc>(msgId)
+
+    const res = await storage.value.putAttachment(
+      msgId,
+      'media',
+      doc._rev,
+      file,
+      file.type || 'application/octet-stream'
+    )
+
+    const updatedDoc = await storage.value.get<MessageDoc>(msgId)
+    updatedDoc.mediaContentType = file.type || 'application/octet-stream'
+    const res2 = await storage.value.put(updatedDoc)
+
+    await loadMessageMediaUrl(msgId)
+
+    if (remote.value) {
+      try {
+        const info = await storage.value.replicate.to(remote.value)
+        console.log('attachMediaToMessage: réplication vers CouchDB OK', info)
+      } catch (err) {
+        console.error('attachMediaToMessage: erreur réplication vers CouchDB', err)
+      }
+    }
+
+    console.log('Attachment ajouté pour le message', msgId, res2.rev)
+  } catch (err) {
+    console.error('Erreur attachMediaToMessage :', err)
+  }
+}
+
+/**
+ * Supprime l’attachment "media" associé à un message.
+ *
+ * choix :
+ * - j'utilise db.removeAttachment pour ne pas supprimer le document complet.
+ * - je libère aussi l’URL locale (URL.revokeObjectURL) pour la mémoire.
+ */
+const removeMediaFromMessage = async (msgId: string) => {
+  if (!storage.value) return
+
+  if (!confirm('Supprimer le média associé à ce message ?')) return
+
+  try {
+    const doc = await storage.value.get<MessageDoc>(msgId)
+    const res = await storage.value.removeAttachment(msgId, 'media', doc._rev)
+
+    const refreshed = await storage.value.get<MessageDoc>(msgId)
+    delete refreshed.mediaContentType
+    const res2 = await storage.value.put(refreshed)
+
+    if (messageMediaUrl.value[msgId]) {
+      URL.revokeObjectURL(messageMediaUrl.value[msgId] as string)
+      messageMediaUrl.value[msgId] = null
+    }
+
+    if (remote.value) {
+      try {
+        const info = await storage.value.replicate.to(remote.value)
+        console.log('removeMediaFromMessage: réplication vers CouchDB OK', info)
+      } catch (err) {
+        console.error('removeMediaFromMessage: erreur réplication vers CouchDB', err)
+      }
+    }
+
+    console.log('Attachment supprimé pour le message', msgId, res2.rev)
+  } catch (err) {
+    console.error('Erreur removeMediaFromMessage :', err)
+  }
 }
 
 onMounted(() => { initDatabase() })
@@ -836,6 +1044,23 @@ onMounted(() => { initDatabase() })
     >
       {{ sortByLikes ? 'Top 10 Messages par Likes (Cliquez pour désactiver)' : 'Afficher le Top 10 Messages par Likes' }}
     </button>
+
+    <div v-if="sortByLikes" class="mt-2 flex items-center space-x-2">
+      <button
+        @click="prevTopMessagesPage"
+        class="px-3 py-1 rounded bg-gray-500 text-white text-xs disabled:opacity-50"
+        :disabled="topMessagesPage === 0"
+      >
+        10 précédents
+      </button>
+      <button
+        @click="nextTopMessagesPage"
+        class="px-3 py-1 rounded bg-gray-700 text-white text-xs"
+      >
+        10 suivants
+      </button>
+      <span class="text-xs text-gray-600">Page {{ topMessagesPage + 1 }}</span>
+    </div>
   </div>
 
   <section>
@@ -911,6 +1136,44 @@ onMounted(() => { initDatabase() })
                 </button>
               </div>
 
+              
+              <div class="mt-2">
+                <label class="text-xs text-gray-600 block mb-1">Média associé (image, audio, etc.)</label>
+                <div class="flex items-center space-x-2">
+                  <input
+                    type="file"
+                    class="text-xs"
+                    @change="(e: Event) => {
+                      const input = e.target as HTMLInputElement
+                      if (input.files && input.files[0]) {
+                        messageMediaFile[msg.id] = input.files[0]
+                      }
+                    }"
+                  />
+                  <button
+                    @click="attachMediaToMessage(msg.id)"
+                    class="bg-blue-400 text-white px-2 py-1 rounded text-xs"
+                  >
+                    Associer
+                  </button>
+                  <button
+                    v-if="messageMediaUrl[msg.id]"
+                    @click="removeMediaFromMessage(msg.id)"
+                    class="bg-red-400 text-white px-2 py-1 rounded text-xs"
+                  >
+                    Supprimer média
+                  </button>
+                </div>
+
+                <div v-if="messageMediaUrl[msg.id]" class="mt-2">
+                  <img
+                    :src="messageMediaUrl[msg.id] as string"
+                    alt="Média du message"
+                    class="max-w-xs max-h-48 border rounded"
+                  />
+                </div>
+              </div>
+
               <div class="mt-2 space-x-2">
                 <button @click="startEditMessage(index, msgIndex)" class="bg-green-500 text-white px-2 py-1 rounded text-xs">Modifier</button>
                 <button @click="deleteMessage(index, msgIndex)" class="bg-red-500 text-white px-2 py-1 rounded text-xs">Supprimer</button>
@@ -924,8 +1187,17 @@ onMounted(() => { initDatabase() })
                   <button @click="addComment(index, msgIndex)" class="bg-blue-400 text-white px-2 py-1 rounded text-xs">Ajouter</button>
                 </div>
 
+                <!--
+                  Exigences :
+                  - "Afficher pour chaque document, le dernier commentaire associé"
+                    => on affiche par défaut le dernier via msg.comments.slice(-1)
+                  - "Pour chaque document, offrir la possibilité de voir tous les commentaires"
+                    => si visibleComments[...] est true, on affiche msg.comments en entier.
+                -->
                 <div
-                  v-for="(comment, commentIndex) in (visibleComments[`${index}-${msgIndex}`] ? msg.comments : msg.comments.slice(0, 1))"
+                  v-for="(comment, commentIndex) in (visibleComments[`${index}-${msgIndex}`]
+                    ? msg.comments
+                    : msg.comments.slice(-1))"
                   :key="comment.id"
                   class="mt-2 p-2 bg-gray-50 rounded text-sm"
                 >
