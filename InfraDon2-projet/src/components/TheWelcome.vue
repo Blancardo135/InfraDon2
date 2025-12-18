@@ -37,7 +37,7 @@ interface MessageDoc {
   textLower: string
   createdAt: string
   likes: number
-  // type MIME du média attaché (si présent)
+  
   mediaContentType?: string
 }
 
@@ -81,35 +81,16 @@ const searchAffiliation = ref('')
 
 const orderByLikesForChar = ref<Record<string, boolean>>({})
 
-// -----------------------------------------------------------------------------
-// AFFICHAGE DES 10 DOCUMENTS LES PLUS "LIKÉS" + PAGINATION
-// -----------------------------------------------------------------------------
-// Exigences :
-//  - Afficher les 10 documents les plus “likés“
-//  - Offrir la possibilité d’afficher les 10 documents suivants sur le même principe
-//
-// Ici, on considère que le "document" à trier par likes est un message (type: 'message').
-// On s’appuie sur PouchDB.find + index Mango (type, likes) pour déléguer tri/pagination
-// à la base (et ne PAS faire les tris en TypeScript).
-//
-// On évite ainsi de charger tous les messages (pas de allDocs+tri en mémoire) pour
-// n’en afficher que 10. On ne récupère que la "page" utile depuis la DB.
-//
-const topMessagesPage = ref(0) // 0 = première page, 1 = page suivante, etc.
+const topMessagesPage = ref(0)
 const TOP_PAGE_SIZE = 10
 
-// Fichiers sélectionnés pour chaque message (clé = messageId)
 const messageMediaFile = ref<Record<string, File | null>>({})
 
-// URLs temporaires pour prévisualiser les médias (clé = messageId)
+
 const messageMediaUrl = ref<Record<string, string | null>>({})
 
 const iso = () => new Date().toISOString()
 
-// -----------------------------------------------------------------------------
-// saveWithConflictRetry
-// -----------------------------------------------------------------------------
-// Utilise db.get + db.put pour gérer les conflits de révision (409).
 // Question "Quelles méthodes PouchDB sont utiles ?" :
 //  - db.get : pour récupérer la dernière révision du doc
 //  - db.put : pour appliquer les modifications
@@ -182,23 +163,14 @@ const initDatabase = async () => {
 }
 
 /**
- * Index Mango nécessaires pour déléguer les tris / recherches à PouchDB
- * plutôt que de trier/filtrer en TS.
  *
  * Question : "Est-ce que allDocs({ include_docs: true }) fait sens ?"
- * - Dans cette appli, NON :
+ * - Dans cette appli, non :
  *   * allDocs(include_docs) chargerait potentiellement toute la base, y compris
  *     des documents qui ne sont pas nécessaires pour l’écran courant.
- *   * On devrait ensuite filtrer/ trier en TypeScript, ce qui va à l’encontre
+ *   * je devrais ensuite filtrer/ trier en TypeScript, ce qui va à l’encontre
  *     de la consigne : "Les traitements de recherches et de tries ne doivent
  *     pas être exécuté en TS."
- *
- * Choix :
- * - Utiliser db.find({ selector, sort }) + db.createIndex(...) pour :
- *   * Récupérer uniquement les documents utiles (messages d’un personnage, top 10, etc.)
- *   * Déléguer les tris/filtrages à PouchDB (et donc, à la base distante lors de la réplication)
- * - Les index (type, likes, characterId, textLower...) sont conçus pour couvrir
- *   les cas d’usage du TP : recherche, tri par likes, filtre par affiliation, etc.
  */
 const createIndexes = async () => {
   if (!storage.value) return
@@ -219,19 +191,11 @@ const createIndexes = async () => {
 }
 
 /**
- * Réplication bidirectionnelle en live entre base locale et CouchDB distante.
- *
- * Question : "Faut-il tout répliquer ?"
- * - Dans ce TP, on a choisi OUI :
+ *  "Faut-il tout répliquer ?"
+ * - Je dis Oui:
  *   * volume de données limité
- *   * on souhaite un mode offline complet (toute l’application fonctionne sans réseau)
+ *   *  mode offline complet (toute l’application fonctionne sans réseau)
  *   * cohérence simple : la base locale = miroir fonctionnel de la base distante
- *
- * Remarque :
- * - Pour une application réelle avec beaucoup de données, on pourrait :
- *   * faire de la réplication filtrée (seulement les docs d'un utilisateur, etc.)
- *   * utiliser plusieurs bases (ex: /messages-recents, /messages-archives)
- *   pour réduire les coûts réseau/stockage.
  */
 const startSync = () => {
   if (!storage.value || !remote.value || syncHandler) {
@@ -239,9 +203,6 @@ const startSync = () => {
     return
   }
   console.log('startSync: démarrage sync bidirectionnelle avec', COUCH_REMOTE)
-  // Méthodes PouchDB utiles ici :
-  // - db.sync(remote, { live: true, retry: true }) pour garder la base locale
-  //   toujours à jour (offline-first) sans faire d’appels manuels en continu.
   syncHandler = storage.value
     .sync(remote.value, { live: true, retry: true })
     .on('change', async (info: any) => {
@@ -272,15 +233,13 @@ const mapCharacterDoc = (d: CharacterDoc) => ({
 })
 
 /**
- * Charge (si présent) l’attachment "media" pour un message donné et produit une URL locale (createObjectURL).
- *
  * Efficacité & réponses aux questions :
  * - On NE fait pas de allDocs({ attachments: true, include_docs: true }) qui renverrait
  *   tous les blobs de la base (inefficace en mémoire + réseau).
  * - On appelle db.getAttachment(messageId, 'media') uniquement pour les messages
  *   effectivement affichés. Cela réduit les échanges au strict minimum nécessaire.
  *
- * Méthodes utilisées :
+ * Méthodes utilisées ici
  * - db.getAttachment : pour récupérer le Blob correspondant à l’attachment
  * - URL.createObjectURL (API Web) : pour générer une URL utilisable dans <img> etc.
  * - URL.revokeObjectURL : pour libérer la ressource quand elle n’est plus utile.
@@ -314,10 +273,10 @@ const loadMessagesForCharacter = async (characterId: string, charIndex: number) 
   if (orderByLikes) selector.likes = { $gte: 0 }
   else selector.createdAt = { $gte: null }
 
-  // Ici, on utilise db.find plutôt que allDocs :
+  // Ici, j'utilise db.find plutôt que allDocs :
   //  - db.find permet de sélectionner uniquement les messages d’un personnage,
-  //    avec un tri côté DB (par date ou par likes).
-  //  - Cela évite de charger tous les messages de tous les personnages.
+  //    avec un tri côté DB.
+  //  - Cela évite de charger tous les messages de tous les perso
   const { docs: messageDocs } = await storage.value.find({
     selector,
     sort,
@@ -1190,9 +1149,9 @@ onMounted(() => { initDatabase() })
                 <!--
                   Exigences :
                   - "Afficher pour chaque document, le dernier commentaire associé"
-                    => on affiche par défaut le dernier via msg.comments.slice(-1)
+                    => j'affiche par défaut le dernier via msg.comments.slice(-1)
                   - "Pour chaque document, offrir la possibilité de voir tous les commentaires"
-                    => si visibleComments[...] est true, on affiche msg.comments en entier.
+                    => si visibleComments[...] est true, j'affiche msg.comments en entier.
                 -->
                 <div
                   v-for="(comment, commentIndex) in (visibleComments[`${index}-${msgIndex}`]
