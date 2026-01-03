@@ -61,7 +61,10 @@ interface CommentDoc {
   text: string
   createdAt: string
 }
-
+// Choix d'architecture : 2 bases distantes (characters + messages) plutôt qu'une seule.
+// Objectif performance : limiter la taille des réplications et éviter que les messages
+// (potentiellement très nombreux et avec attachments) ne ralentissent les lectures/requêtes
+// sur les personnages (CRUD plus léger).
 const COUCH_REMOTE_CHARACTERS = 'http://RomainBlanchard:admin@localhost:5984/coachdb-characters'
 const COUCH_REMOTE_MESSAGES   = 'http://RomainBlanchard:admin@localhost:5984/coachdb-messages'
 
@@ -116,7 +119,7 @@ const characterMediaUrl  = ref<Record<string, string | null>>({})
 const iso = () => new Date().toISOString()
 
 
-
+//gestion conflit avec retry+merge, je récupère la version la plus récente, car les modif peuvent être faites depuis deux clients.
 const saveWithConflictRetry = async <
   T extends { _id: string; _rev?: string }
 >(
@@ -186,7 +189,8 @@ const removeWithRetry = async (
   console.error('Échec de suppression après plusieurs tentatives :', lastError)
   return false
 }
-
+// je crée les index avant de faire des requêtes Mango (find),
+// sinon PouchDB devra scanner davantage de documents.
 const initDatabase = async () => {
  
   const localChars = new PouchDB('infradon-blaro-characters')
@@ -205,7 +209,8 @@ const initDatabase = async () => {
     'localMsgs=infradon-blaro-messages, remoteMsgs=',
     COUCH_REMOTE_MESSAGES
   )
-
+//createIndex me permet de préparer les index nécessaires pour les requêtes mango.
+//toutes les recherches doivent etre executées côté DB.
   await createIndexesCharacters()
   await createIndexesMessages()
   await fetchData()
@@ -241,7 +246,10 @@ const createIndexesMessages = async () => {
     console.error('Erreur création index messages :', err)
   }
 }
+//jutilise db.sync(remote, { live:true, retry:true }) pour une synchronisation bidirectionnelle
+//comme ça l'appli reste a jour et je peux utiliser le mode off/online
 
+//Pour la question "tout répliquer ?" Oui, je réplique ici toutes les données des deux bases pour simplifier et garantir l'accès offline.
 const startSync = () => {
   const dbChars = storageCharacters.value
   const dbMsgs  = storageMessages.value
@@ -426,6 +434,9 @@ const reloadAllMessages = async () => {
   }
 }
 
+//Pour la question "est-ce que allDocs avec "include_docs" fait sens?"
+//je dirai que c'est pratique si on a besoin de tout récupérer rapidement si on pas de filtre.
+//Mais ici, mango + index est plus adapté.
 const fetchData = async (onlyTopMessagesByLikes = false) => {
   const dbChars = storageCharacters.value
   const dbMsgs  = storageMessages.value
@@ -1100,7 +1111,7 @@ const searchMessages = async () => {
     console.error('Erreur recherche messages :', err)
   }
 }
-
+//find sur affiliation, comme ça pas de filtrage en typescript et recherche insensible a la casse.
 const searchByAffiliation = async () => {
   const dbChars = storageCharacters.value
   if (!dbChars) return
@@ -1174,7 +1185,7 @@ const attachMediaToMessage = async (msgId: string) => {
 
   try {
     const doc = await dbMsgs.get<MessageDoc>(msgId)
-
+      //je stocke le média comme attachment couchdb/pouchdb, pour éviter que ce soit trop lourd j'ai fait deux collections.
     await dbMsgs.putAttachment(
       msgId,
       'media',
@@ -1329,7 +1340,7 @@ onMounted(() => {
   <div class="app">
     <!-- Header -->
     <header class="header">
-      <h1>⚔️ Personnages</h1>
+      <h1>Personnages</h1>
       <button @click="toggleOnline" class="status-btn" :class="{ online: isOnline }">
         {{ isOnline ? '● En ligne' : '○ Hors ligne' }}
       </button>
@@ -1352,7 +1363,7 @@ onMounted(() => {
 
    
     <section class="panel">
-      <h2>🔍 Recherche</h2>
+      <h2>Recherche</h2>
       <div class="filters">
         <div class="filter-group">
           <input v-model="searchAffiliation" placeholder="Affiliation..." />
@@ -1427,7 +1438,7 @@ onMounted(() => {
           <!-- Section Messages -->
           <div class="messages-section">
             <div class="section-header">
-              <span>💬 Messages</span>
+              <span>Messages</span>
               <button @click="toggleCharSort(index)" class="btn xs" :class="{ active: orderByLikesForChar[char.docId] }">
                 {{ orderByLikesForChar[char.docId] ? '♥' : '📅' }}
               </button>
