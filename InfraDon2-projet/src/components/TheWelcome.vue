@@ -118,6 +118,10 @@ const characterMediaUrl  = ref<Record<string, string | null>>({})
 
 const iso = () => new Date().toISOString()
 
+const LIMIT_CHARACTERS = 5000
+const LIMIT_MESSAGES_PER_CHARACTER = 5000
+const LIMIT_COMMENTS = 5000
+
 
 //gestion conflit avec retry+merge, je récupère la version la plus récente, car les modif peuvent être faites depuis deux clients.
 const saveWithConflictRetry = async <
@@ -189,6 +193,29 @@ const removeWithRetry = async (
   console.error('Échec de suppression après plusieurs tentatives :', lastError)
   return false
 }
+
+const generateFakeCharacter = (): Character => {
+  const names = ['Luke', 'Leia', 'Han', 'Rey', 'Finn', 'Obi-Wan', 'Anakin', 'Padmé', 'Mando', 'Ahsoka']
+  const affiliations = ['Jedi', 'Sith', 'Rebelles', 'Empire', 'Mandalorien', 'Résistance']
+  const name = names[Math.floor(Math.random() * names.length)]
+  const affiliation = affiliations[Math.floor(Math.random() * affiliations.length)]
+  const age = 18 + Math.floor(Math.random() * 50)
+  const lightsaber = affiliation === 'Jedi' || affiliation === 'Sith'
+  return {
+    name: `${name} ${Math.floor(Math.random() * 1000)}`,
+    age,
+    affiliation,
+    lightsaber,
+    likes: 0,
+    messages: []
+  }
+}
+
+const addFakeCharacter = async () => {
+  newCharacter.value = generateFakeCharacter()
+  await addCharacter()
+}
+
 // je crée les index avant de faire des requêtes Mango (find),
 // sinon PouchDB devra scanner davantage de documents.
 const initDatabase = async () => {
@@ -224,6 +251,7 @@ const createIndexesCharacters = async () => {
     await db.createIndex({ index: { fields: ['type'] } })
     await db.createIndex({ index: { fields: ['type', 'affiliationLower'] } })
     await db.createIndex({ index: { fields: ['type', 'messageId'] } })
+    await db.createIndex({ index: { fields: ['type', 'messageId', 'createdAt'] } })
     console.log('Index Mango créés (characters/comments)')
   } catch (err) {
     console.error('Erreur création index characters/comments :', err)
@@ -277,7 +305,7 @@ const startSync = () => {
       .sync(rChars, { live: true, retry: true })
       .on('change', async (info: any) => {
         console.log('sync chars change:', info)
-        await fetchData(sortByLikes.value)
+        await handleSyncChange(info, 'chars')
       })
       .on('error', (err: any) => console.error('Erreur sync chars :', err))
   }
@@ -288,7 +316,7 @@ const startSync = () => {
       .sync(rMsgs, { live: true, retry: true })
       .on('change', async (info: any) => {
         console.log('sync msgs change:', info)
-        await fetchData(sortByLikes.value)
+        await handleSyncChange(info, 'msgs')
       })
       .on('error', (err: any) => console.error('Erreur sync msgs :', err))
   }
@@ -387,37 +415,34 @@ const loadMessagesForCharacter = async (characterId: string, charIndex: number) 
   const { docs: messageDocs } = await dbMsgs.find({
     selector,
     sort,
-    limit: 9999
+    limit: LIMIT_MESSAGES_PER_CHARACTER
   })
 
   const messages = messageDocs as MessageDoc[]
-  const messageIds = messages.map(m => m._id)
 
-  let commentsByMsg = new Map<string, CommentDoc[]>()
+  const uiMessages: Message[] = []
 
-  if (messageIds.length) {
-    const { docs: commentDocs } = await dbChars.find({
-      selector: { type: 'comment', messageId: { $in: messageIds } },
-      limit: 9999
+  for (const m of messages) {
+    const { docs: lastCommentDocs } = await dbChars.find({
+      selector: {
+        type: 'comment',
+        messageId: m._id,
+        createdAt: { $gte: null }
+      },
+      sort: [{ type: 'asc' }, { messageId: 'asc' }, { createdAt: 'desc' }],
+      limit: 1
     })
 
-    commentsByMsg = (commentDocs as CommentDoc[]).reduce((acc, c) => {
-      const arr = acc.get(c.messageId) || []
-      arr.push(c)
-      acc.set(c.messageId, arr)
-      return acc
-    }, new Map<string, CommentDoc[]>())
-  }
+    const c = lastCommentDocs[0] as CommentDoc | undefined
 
-  const uiMessages: Message[] = messages.map(m => ({
-    id: m._id,
-    text: m.text,
-    createdAt: m.createdAt,
-    likes: m.likes ?? 0,
-    comments: (commentsByMsg.get(m._id) || [])
-      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
-      .map(c => ({ id: c._id, text: c.text, createdAt: c.createdAt }))
-  }))
+    uiMessages.push({
+      id: m._id,
+      text: m.text,
+      createdAt: m.createdAt,
+      likes: m.likes ?? 0,
+      comments: c ? [{ id: c._id, text: c.text, createdAt: c.createdAt }] : []
+    })
+  }
 
   if (characters.value[charIndex]?.docId === characterId) {
     characters.value[charIndex].data.messages = uiMessages
@@ -477,32 +502,28 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
         await loadCharacterMediaUrl(c.docId)
       }
 
-      const msgIds = messages.map(m => m._id)
-
-      const { docs: cmtDocs } = await dbChars.find({
-        selector: { type: 'comment', messageId: { $in: msgIds } },
-        limit: 9999
-      })
-
-      const commentsByMsg = (cmtDocs as CommentDoc[]).reduce((acc, c) => {
-        const arr = acc.get(c.messageId) || []
-        arr.push(c)
-        acc.set(c.messageId, arr)
-        return acc
-      }, new Map<string, CommentDoc[]>())
-
       for (const m of messages) {
         const idx = charMap.get(m.characterId)
         if (idx === undefined) continue
+
+        const { docs: lastCommentDocs } = await dbChars.find({
+          selector: {
+            type: 'comment',
+            messageId: m._id,
+            createdAt: { $gte: null }
+          },
+          sort: [{ type: 'asc' }, { messageId: 'asc' }, { createdAt: 'desc' }],
+          limit: 1
+        })
+
+        const c = lastCommentDocs[0] as CommentDoc | undefined
 
         const msgUI: Message = {
           id: m._id,
           text: m.text,
           createdAt: m.createdAt,
           likes: m.likes ?? 0,
-          comments: (commentsByMsg.get(m._id) || [])
-            .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
-            .map(c => ({ id: c._id, text: c.text, createdAt: c.createdAt }))
+          comments: c ? [{ id: c._id, text: c.text, createdAt: c.createdAt }] : []
         }
 
         const arr = characters.value[idx].data.messages || []
@@ -514,7 +535,7 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
     } else {
       const { docs } = await dbChars.find({
         selector: { type: 'character' },
-        limit: 9999
+        limit: LIMIT_CHARACTERS
       })
       characters.value = (docs as CharacterDoc[]).map(mapCharacterDoc)
 
@@ -528,6 +549,140 @@ const fetchData = async (onlyTopMessagesByLikes = false) => {
   } catch (err) {
     console.error('Erreur fetch data :', err)
   }
+}
+
+const fetchCharactersOnly = async () => {
+  const dbChars = storageCharacters.value
+  if (!dbChars) return
+  const { docs } = await dbChars.find({
+    selector: { type: 'character' },
+    limit: LIMIT_CHARACTERS
+  })
+  characters.value = (docs as CharacterDoc[]).map(mapCharacterDoc)
+
+  for (const c of characters.value) {
+    await loadCharacterMediaUrl(c.docId)
+  }
+}
+
+const refreshCharacterById = async (characterId: string) => {
+  const dbChars = storageCharacters.value
+  if (!dbChars) return
+
+  const idx = characters.value.findIndex(c => c.docId === characterId)
+  try {
+    const d = await dbChars.get<CharacterDoc>(characterId)
+    if (d.type !== 'character') return
+    const mapped = mapCharacterDoc(d)
+    if (idx >= 0) {
+      characters.value[idx] = mapped
+      await loadCharacterMediaUrl(characterId)
+    } else {
+      await fetchCharactersOnly()
+    }
+  } catch (err: any) {
+    if (err?.status === 404) {
+      if (idx >= 0) characters.value.splice(idx, 1)
+      return
+    }
+    console.error('refreshCharacterById erreur:', err)
+  }
+}
+
+const refreshMessagesForCharacterId = async (characterId: string) => {
+  const idx = characters.value.findIndex(c => c.docId === characterId)
+  if (idx < 0) return
+  await loadMessagesForCharacter(characterId, idx)
+}
+
+const refreshCommentsForMessageId = async (messageId: string) => {
+  for (let charIndex = 0; charIndex < characters.value.length; charIndex++) {
+    const msgs = characters.value[charIndex].data.messages || []
+    const found = msgs.find(m => m.id === messageId)
+    if (found) {
+      await loadMessagesForCharacter(characters.value[charIndex].docId, charIndex)
+      return
+    }
+  }
+}
+
+let syncRefreshTimer: any = null
+let pendingCharIds = new Set<string>()
+let pendingMsgIds = new Set<string>()
+let pendingNeedFullReload = false
+
+const scheduleTargetedRefresh = () => {
+  if (syncRefreshTimer) clearTimeout(syncRefreshTimer)
+  syncRefreshTimer = setTimeout(async () => {
+    syncRefreshTimer = null
+
+    if (sortByLikes.value) {
+      pendingCharIds.clear()
+      pendingMsgIds.clear()
+      pendingNeedFullReload = false
+      await fetchData(true)
+      return
+    }
+
+    if (pendingNeedFullReload) {
+      pendingNeedFullReload = false
+      pendingCharIds.clear()
+      pendingMsgIds.clear()
+      await fetchData(false)
+      return
+    }
+
+    const charIds = Array.from(pendingCharIds)
+    const msgIds = Array.from(pendingMsgIds)
+    pendingCharIds.clear()
+    pendingMsgIds.clear()
+
+    for (const cid of charIds) {
+      await refreshCharacterById(cid)
+      await refreshMessagesForCharacterId(cid)
+    }
+    for (const mid of msgIds) {
+      await refreshCommentsForMessageId(mid)
+    }
+  }, 120)
+}
+
+const handleSyncChange = async (info: any, source: 'chars' | 'msgs') => {
+  if (!isOnline.value) return
+
+  const changes = info?.change?.docs
+  if (!Array.isArray(changes) || !changes.length) {
+    pendingNeedFullReload = true
+    scheduleTargetedRefresh()
+    return
+  }
+
+  for (const d of changes) {
+    const id: string = d?._id
+    const type: string = d?.type
+
+    if (source === 'chars') {
+      if (type === 'character' && id) {
+        pendingCharIds.add(id)
+      } else if (type === 'comment' && d?.messageId) {
+        pendingMsgIds.add(d.messageId)
+      } else {
+        pendingNeedFullReload = true
+      }
+    }
+
+    if (source === 'msgs') {
+      if (type === 'message' && id) {
+        const characterId: string | undefined = d?.characterId
+        if (characterId) pendingCharIds.add(characterId)
+        else pendingNeedFullReload = true
+      } else {
+        pendingNeedFullReload = true
+      }
+    }
+  }
+
+  scheduleTargetedRefresh()
 }
 
 const addCharacter = async () => {
@@ -551,17 +706,6 @@ const addCharacter = async () => {
 
     const res = await dbChars.put(doc)
     console.log('addCharacter: écrit en local', doc._id, 'rev=', res.rev)
-
-    if (remoteCharacters.value) {
-      try {
-        const info = await dbChars.replicate.to(remoteCharacters.value)
-        console.log('addCharacter: réplication vers CouchDB OK', info)
-      } catch (repErr) {
-        console.error('addCharacter: erreur réplication vers CouchDB', repErr)
-      }
-    } else {
-      console.warn('addCharacter: remote DB non initialisée, pas de réplication immédiate')
-    }
 
     characters.value.push(mapCharacterDoc({ ...doc, _rev: res.rev }))
 
@@ -638,7 +782,7 @@ const deleteCharacter = async (index: number) => {
     
     const { docs: msgDocs } = await dbMsgs.find({
       selector: { type: 'message', characterId },
-      limit: 9999
+      limit: LIMIT_MESSAGES_PER_CHARACTER
     })
 
     const msgs = msgDocs as MessageDoc[]
@@ -649,7 +793,7 @@ const deleteCharacter = async (index: number) => {
       
       const { docs: cmtDocs } = await dbChars.find({
         selector: { type: 'comment', messageId: { $in: msgIds } },
-        limit: 9999
+        limit: LIMIT_COMMENTS
       })
 
       const cmts = cmtDocs as CommentDoc[]
@@ -668,24 +812,6 @@ const deleteCharacter = async (index: number) => {
 
     await removeWithRetry(dbChars, characterId)
     characters.value.splice(index, 1)
-
-    if (remoteCharacters.value) {
-      try {
-        const info = await dbChars.replicate.to(remoteCharacters.value)
-        console.log('deleteCharacter: réplication suppressions vers CouchDB characters OK', info)
-      } catch (err) {
-        console.error('deleteCharacter: erreur réplication suppressions vers CouchDB characters', err)
-      }
-    }
-
-    if (remoteMessages.value) {
-      try {
-        const info = await dbMsgs.replicate.to(remoteMessages.value)
-        console.log('deleteCharacter: réplication suppressions vers CouchDB messages OK', info)
-      } catch (err) {
-        console.error('deleteCharacter: erreur réplication suppressions vers CouchDB messages', err)
-      }
-    }
   } catch (err) {
     console.error('Erreur suppression personnage :', err)
   }
@@ -713,15 +839,6 @@ const addMessage = async (charIndex: number) => {
 
     await dbMsgs.put(msg)
     await loadMessagesForCharacter(char.docId, charIndex)
-
-    if (remoteMessages.value) {
-      try {
-        const info = await dbMsgs.replicate.to(remoteMessages.value)
-        console.log('addMessage: réplication vers CouchDB messages OK', info)
-      } catch (err) {
-        console.error('addMessage: erreur réplication vers CouchDB messages', err)
-      }
-    }
 
     newMessageText.value[charIndex] = ''
   } catch (err) {
@@ -780,7 +897,7 @@ const deleteMessage = async (charIndex: number, msgIndex: number) => {
 
     const { docs: cmtDocs } = await dbChars.find({
       selector: { type: 'comment', messageId: msg.id },
-      limit: 9999
+      limit: LIMIT_COMMENTS
     })
 
     const cmts = cmtDocs as CommentDoc[]
@@ -796,24 +913,6 @@ const deleteMessage = async (charIndex: number, msgIndex: number) => {
 
     await removeWithRetry(dbMsgs, msg.id)
     await loadMessagesForCharacter(char.docId, charIndex)
-
-    if (remoteMessages.value) {
-      try {
-        const info = await dbMsgs.replicate.to(remoteMessages.value)
-        console.log('deleteMessage: réplication suppressions vers CouchDB messages OK', info)
-      } catch (err) {
-        console.error('deleteMessage: erreur réplication suppressions vers CouchDB messages', err)
-      }
-    }
-
-    if (remoteCharacters.value) {
-      try {
-        const info = await dbChars.replicate.to(remoteCharacters.value)
-        console.log('deleteMessage: réplication suppressions vers CouchDB characters OK', info)
-      } catch (err) {
-        console.error('deleteMessage: erreur réplication suppressions vers CouchDB characters', err)
-      }
-    }
   } catch (err) {
     console.error('Erreur suppression message :', err)
   }
@@ -844,15 +943,6 @@ const likeCharacter = async (charIndex: number) => {
         await loadMessagesForCharacter(curr.docId, charIndex)
         await loadCharacterMediaUrl(curr.docId)
       }
-
-      if (remoteCharacters.value) {
-        try {
-          const info = await dbChars.replicate.to(remoteCharacters.value)
-          console.log('likeCharacter: réplication vers CouchDB characters OK', info)
-        } catch (err) {
-          console.error('likeCharacter: erreur réplication vers CouchDB characters', err)
-        }
-      }
     }
   } catch (err) {
     console.error('Erreur like personnage :', err)
@@ -880,15 +970,6 @@ const likeMessage = async (charIndex: number, msgIndex: number) => {
         await fetchData(true)
       } else {
         await loadMessagesForCharacter(characters.value[charIndex].docId, charIndex)
-      }
-
-      if (remoteMessages.value) {
-        try {
-          const info = await dbMsgs.replicate.to(remoteMessages.value)
-          console.log('likeMessage: réplication vers CouchDB messages OK', info)
-        } catch (err) {
-          console.error('likeMessage: erreur réplication vers CouchDB messages', err)
-        }
       }
     }
   } catch (err) {
@@ -921,15 +1002,6 @@ const addComment = async (charIndex: number, msgIndex: number) => {
 
     newCommentText.value[key] = ''
     visibleComments.value[key] = true
-
-    if (remoteCharacters.value) {
-      try {
-        const info = await dbChars.replicate.to(remoteCharacters.value)
-        console.log('addComment: réplication vers CouchDB characters OK', info)
-      } catch (err) {
-        console.error('addComment: erreur réplication vers CouchDB characters', err)
-      }
-    }
   } catch (err) {
     console.error('Erreur ajout commentaire :', err)
   }
@@ -966,15 +1038,6 @@ const saveEditComment = async () => {
 
     if (updated) {
       await loadMessagesForCharacter(char.docId, charIndex)
-
-      if (remoteCharacters.value) {
-        try {
-          const info = await dbChars.replicate.to(remoteCharacters.value)
-          console.log('saveEditComment: réplication vers CouchDB characters OK', info)
-        } catch (err) {
-          console.error('saveEditComment: erreur réplication vers CouchDB characters', err)
-        }
-      }
     }
 
     cancelEditComment()
@@ -995,15 +1058,6 @@ const deleteComment = async (charIndex: number, msgIndex: number, commentIndex: 
 
     await removeWithRetry(dbChars, cmt.id)
     await loadMessagesForCharacter(char.docId, charIndex)
-
-    if (remoteCharacters.value) {
-      try {
-        const info = await dbChars.replicate.to(remoteCharacters.value)
-        console.log('deleteComment: réplication suppressions vers CouchDB characters OK', info)
-      } catch (err) {
-        console.error('deleteComment: erreur réplication suppressions vers CouchDB characters', err)
-      }
-    }
   } catch (err) {
     console.error('Erreur suppression commentaire :', err)
   }
@@ -1073,32 +1127,28 @@ const searchMessages = async () => {
       await loadCharacterMediaUrl(c.docId)
     }
 
-    const msgIds = messages.map(m => m._id)
-
-    const { docs: cmtDocs } = await dbChars.find({
-      selector: { type: 'comment', messageId: { $in: msgIds } },
-      limit: 9999
-    })
-
-    const commentsByMsg = (cmtDocs as CommentDoc[]).reduce((acc, c) => {
-      const arr = acc.get(c.messageId) || []
-      arr.push(c)
-      acc.set(c.messageId, arr)
-      return acc
-    }, new Map<string, CommentDoc[]>())
-
     for (const m of messages) {
       const idx = charMap.get(m.characterId)
       if (idx === undefined) continue
+
+      const { docs: lastCommentDocs } = await dbChars.find({
+        selector: {
+          type: 'comment',
+          messageId: m._id,
+          createdAt: { $gte: null }
+        },
+        sort: [{ type: 'asc' }, { messageId: 'asc' }, { createdAt: 'desc' }],
+        limit: 1
+      })
+
+      const c = lastCommentDocs[0] as CommentDoc | undefined
 
       const msgUI: Message = {
         id: m._id,
         text: m.text,
         createdAt: m.createdAt,
         likes: m.likes ?? 0,
-        comments: (commentsByMsg.get(m._id) || [])
-          .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
-          .map(c => ({ id: c._id, text: c.text, createdAt: c.createdAt }))
+        comments: c ? [{ id: c._id, text: c.text, createdAt: c.createdAt }] : []
       }
 
       const arr = characters.value[idx].data.messages || []
@@ -1127,7 +1177,7 @@ const searchByAffiliation = async () => {
   try {
     const { docs } = await dbChars.find({
       selector: { type: 'character', affiliationLower: val },
-      limit: 9999
+      limit: LIMIT_CHARACTERS
     })
 
     characters.value = (docs as CharacterDoc[]).map(mapCharacterDoc)
@@ -1201,15 +1251,6 @@ const attachMediaToMessage = async (msgId: string) => {
     await loadMessageMediaUrl(msgId)
     messageMediaFile.value[msgId] = null
 
-    if (remoteMessages.value) {
-      try {
-        const info = await dbMsgs.replicate.to(remoteMessages.value)
-        console.log('attachMediaToMessage: réplication vers CouchDB messages OK', info)
-      } catch (err) {
-        console.error('attachMediaToMessage: erreur réplication vers CouchDB messages', err)
-      }
-    }
-
     console.log('Attachment ajouté pour le message', msgId)
   } catch (err) {
     console.error('Erreur attachMediaToMessage :', err)
@@ -1233,15 +1274,6 @@ const removeMediaFromMessage = async (msgId: string) => {
     if (messageMediaUrl.value[msgId]) {
       URL.revokeObjectURL(messageMediaUrl.value[msgId] as string)
       messageMediaUrl.value[msgId] = null
-    }
-
-    if (remoteMessages.value) {
-      try {
-        const info = await dbMsgs.replicate.to(remoteMessages.value)
-        console.log('removeMediaFromMessage: réplication vers CouchDB messages OK', info)
-      } catch (err) {
-        console.error('removeMediaFromMessage: erreur réplication vers CouchDB messages', err)
-      }
     }
 
     console.log('Attachment supprimé pour le message', msgId)
@@ -1280,15 +1312,6 @@ const attachMediaToCharacter = async (characterId: string) => {
     await loadCharacterMediaUrl(characterId)
     characterMediaFile.value[characterId] = null
 
-    if (remoteCharacters.value) {
-      try {
-        const info = await dbChars.replicate.to(remoteCharacters.value)
-        console.log('attachMediaToCharacter: réplication vers CouchDB characters OK', info)
-      } catch (err) {
-        console.error('attachMediaToCharacter: erreur réplication vers CouchDB characters', err)
-      }
-    }
-
     console.log('Attachment ajouté pour le personnage', characterId)
   } catch (err) {
     console.error('Erreur attachMediaToCharacter :', err)
@@ -1314,15 +1337,6 @@ const removeMediaFromCharacter = async (characterId: string) => {
       characterMediaUrl.value[characterId] = null
     }
 
-    if (remoteCharacters.value) {
-      try {
-        const info = await dbChars.replicate.to(remoteCharacters.value)
-        console.log('removeMediaFromCharacter: réplication vers CouchDB characters OK', info)
-      } catch (err) {
-        console.error('removeMediaFromCharacter: erreur réplication vers CouchDB characters', err)
-      }
-    }
-
     console.log('Attachment supprimé pour le personnage', characterId)
   } catch (err) {
     console.error('Erreur removeMediaFromCharacter :', err)
@@ -1338,11 +1352,11 @@ onMounted(() => {
 
 <template>
   <div class="app">
-    <!-- Header -->
+   
     <header class="header">
       <h1>Personnages</h1>
       <button @click="toggleOnline" class="status-btn" :class="{ online: isOnline }">
-        {{ isOnline ? '● En ligne' : '○ Hors ligne' }}
+        {{ isOnline ? 'En ligne' : 'Hors ligne' }}
       </button>
     </header>
 
@@ -1355,7 +1369,7 @@ onMounted(() => {
         <input v-model="newCharacter.affiliation" placeholder="Affiliation" required />
         <label class="checkbox">
           <input type="checkbox" v-model="newCharacter.lightsaber" />
-          <span>⚔️ Sabre</span>
+          <span>Sabre</span>
         </label>
         <button type="submit" class="btn primary">Ajouter</button>
       </form>
@@ -1374,7 +1388,7 @@ onMounted(() => {
           <button @click="searchMessages" class="btn">Chercher</button>
         </div>
         <button @click="toggleSortByLikes" class="btn" :class="{ active: sortByLikes }">
-          {{ sortByLikes ? '★ Top 10 ON' : '☆ Top 10' }}
+          {{ sortByLikes ? 'Top 10 activé' : 'Top 10 likés' }}
         </button>
         <div v-if="sortByLikes" class="pagination">
           <button @click="prevTopMessagesPage" :disabled="topMessagesPage === 0" class="btn sm">←</button>
@@ -1399,7 +1413,7 @@ onMounted(() => {
               <h3>{{ char.data.name }}</h3>
               <p>
                 {{ char.data.age }} ans • {{ char.data.affiliation }}
-                <span v-if="char.data.lightsaber">⚔️</span>
+                <span v-if="char.data.lightsaber"></span>
               </p>
             </div>
             <button @click="likeCharacter(index)" class="like-btn">
@@ -1410,7 +1424,7 @@ onMounted(() => {
           
           <div class="card-actions">
             <div class="btn-row">
-              <button @click="startEdit(index)" class="btn sm success">✎ Modifier</button>
+              <button @click="startEdit(index)" class="btn sm success">Modifier</button>
               <button @click="deleteCharacter(index)" class="btn sm danger">✕ Supprimer</button>
             </div>
           </div>
@@ -1418,7 +1432,7 @@ onMounted(() => {
           
           <div class="media-section">
             <div class="media-header">
-              <span>📎 Média associé</span>
+              <span>Média associé</span>
             </div>
             <div class="media-controls">
               <input type="file" :id="'cf-' + char.docId" hidden
@@ -1426,9 +1440,9 @@ onMounted(() => {
                   const t = e.target as HTMLInputElement
                   if (t.files?.[0]) characterMediaFile[char.docId] = t.files[0]
                 }" />
-              <label :for="'cf-' + char.docId" class="btn sm ghost">📷 Choisir</label>
-              <button v-if="characterMediaFile[char.docId]" @click="attachMediaToCharacter(char.docId)" class="btn sm primary">↑ Envoyer</button>
-              <button v-if="characterMediaUrl[char.docId]" @click="removeMediaFromCharacter(char.docId)" class="btn sm danger">🗑 Supprimer</button>
+              <label :for="'cf-' + char.docId" class="btn sm ghost">Choisir un media</label>
+              <button v-if="characterMediaFile[char.docId]" @click="attachMediaToCharacter(char.docId)" class="btn sm primary">Envoyer</button>
+              <button v-if="characterMediaUrl[char.docId]" @click="removeMediaFromCharacter(char.docId)" class="btn sm danger">Supprimer</button>
             </div>
             <div v-if="characterMediaUrl[char.docId]" class="media-preview">
               <img :src="characterMediaUrl[char.docId] as string" alt="Média du personnage" />
@@ -1534,7 +1548,7 @@ onMounted(() => {
             <input v-model="editingCharacter!.affiliation" placeholder="Affiliation" required />
             <label class="checkbox">
               <input type="checkbox" v-model="editingCharacter!.lightsaber" />
-              <span>⚔️ Sabre laser</span>
+              <span>Sabre laser</span>
             </label>
             <div class="btn-row">
               <button type="submit" class="btn primary">Enregistrer</button>
@@ -1814,7 +1828,7 @@ input:focus {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--primary), #8b5cf6);
+  background: #1568b0;
   display: flex;
   align-items: center;
   justify-content: center;
